@@ -6,5 +6,6 @@ release
 .DS_Store
 coverage
 *.log
+*.tsbuildinfo
 apps/desktop/dev.db
 apps/desktop/user-data
