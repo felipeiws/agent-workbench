@@ -1,0 +1,10 @@
+node_modules
+dist
+out
+build
+release
+.DS_Store
+coverage
+*.log
+apps/desktop/dev.db
+apps/desktop/user-data

@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "jsx": "react-jsx",
+    "types": ["node"]
+  },
+  "include": ["src", "electron.vite.config.ts", "tailwind.config.ts", "postcss.config.js"],
+  "references": [
+    { "path": "../../packages/core" },
+    { "path": "../../packages/shared" },
+    { "path": "../../packages/types" },
+    { "path": "../../packages/ui" }
+  ]
+}

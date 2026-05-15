@@ -1,0 +1,14 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/types" },
+    { "path": "./packages/shared" },
+    { "path": "./packages/ui" },
+    { "path": "./packages/database" },
+    { "path": "./packages/git" },
+    { "path": "./packages/terminal" },
+    { "path": "./packages/watcher" },
+    { "path": "./packages/core" },
+    { "path": "./apps/desktop" }
+  ]
+}

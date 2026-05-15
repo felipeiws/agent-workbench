@@ -1,0 +1,17 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "types": ["node", "react", "react-dom"]
+  },
+  "include": [
+    "apps/desktop/**/*.ts",
+    "apps/desktop/**/*.tsx",
+    "apps/desktop/**/*.d.ts",
+    "packages/**/*.ts",
+    "packages/**/*.tsx",
+    "packages/**/*.d.ts",
+    "vitest.config.ts"
+  ],
+  "exclude": ["node_modules", "dist", "build", "release"]
+}

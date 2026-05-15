@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true
+  },
+  "include": ["src"],
+  "references": [
+    { "path": "../database" },
+    { "path": "../git" },
+    { "path": "../shared" },
+    { "path": "../terminal" },
+    { "path": "../types" },
+    { "path": "../watcher" }
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "allowImportingTsExtensions": false,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["apps/desktop/src/renderer/*"],
+      "@agent-workbench/core": ["packages/core/src/index.ts"],
+      "@agent-workbench/database": ["packages/database/src/index.ts"],
+      "@agent-workbench/git": ["packages/git/src/index.ts"],
+      "@agent-workbench/shared": ["packages/shared/src/index.ts"],
+      "@agent-workbench/terminal": ["packages/terminal/src/index.ts"],
+      "@agent-workbench/types": ["packages/types/src/index.ts"],
+      "@agent-workbench/ui": ["packages/ui/src/index.ts"],
+      "@agent-workbench/watcher": ["packages/watcher/src/index.ts"]
+    }
+  }
+}
