@@ -9,3 +9,4 @@ coverage
 *.tsbuildinfo
 apps/desktop/dev.db
 apps/desktop/user-data
+.idea
