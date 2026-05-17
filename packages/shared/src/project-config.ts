@@ -11,13 +11,23 @@ export const projectTerminalTemplateSchema = z.object({
   command: z.string().min(1)
 });
 
+export const projectGitHubConfigSchema = z.object({
+  owner: z.string().min(1),
+  repo: z.string().min(1),
+  watchIssues: z.boolean().default(false),
+  labels: z.array(z.string().min(1)).min(1),
+  pollIntervalMs: z.number().int().min(10000).optional(),
+  agentCommand: z.string().min(1).optional()
+});
+
 export const projectConfigSchema = z.object({
   project: z.string().min(1),
   safeMode: z.enum(["off", "audit", "protect"]).default("audit"),
   ide: z.object({
     command: z.string().min(1)
   }),
-  terminals: z.array(projectTerminalTemplateSchema).min(1)
+  terminals: z.array(projectTerminalTemplateSchema).min(1),
+  github: projectGitHubConfigSchema.optional()
 });
 
 export const PROJECT_CONFIG_FILE = ".agent-workspace.json";

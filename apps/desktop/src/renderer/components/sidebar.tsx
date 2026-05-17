@@ -1,109 +1,224 @@
-import { FolderGit2, Layers3, Sparkles } from "lucide-react";
+import { useMemo, useRef, useState } from "react";
 
-import { Badge, Button, Card, CardContent, CardHeader, ScrollArea } from "@agent-workbench/ui";
+import { ForgeIcon } from "./forge-icons";
+import { StateDot } from "./status-badge";
 
-import { useWorkbenchStore } from "@/lib/store";
+export interface WorkspaceTab {
+  id: string;
+  name: string;
+  count: number;
+}
 
-export function Sidebar() {
-  const snapshot = useWorkbenchStore((state) => state.snapshot);
-  const selectedProjectId = useWorkbenchStore((state) => state.selectedProjectId);
-  const setSelectedProject = useWorkbenchStore((state) => state.setSelectedProject);
+export interface SidebarProjectItem {
+  id: string;
+  name: string;
+  path: string;
+  branch: string;
+  changed: number;
+  waiting: number;
+  errors: number;
+  terminals: number;
+}
 
-  if (!snapshot) {
-    return null;
-  }
+interface SidebarProps {
+  workspaces: WorkspaceTab[];
+  workspaceId: string;
+  projectId: string;
+  onWorkspaceChange: (workspaceId: string) => void;
+  onWorkspaceRename: (workspaceId: string, name: string) => void;
+  onProjectChange: (projectId: string) => void;
+  onRemoveProject: (projectId: string) => void;
+  onAddProject: () => void;
+  projects: SidebarProjectItem[];
+  importError: string | null;
+}
+
+export function Sidebar({
+  workspaces,
+  workspaceId,
+  projectId,
+  onWorkspaceChange,
+  onWorkspaceRename,
+  onProjectChange,
+  onRemoveProject,
+  onAddProject,
+  projects,
+  importError
+}: SidebarProps) {
+  const [expandedProjects, setExpandedProjects] = useState<Record<string, boolean>>({
+    [projectId]: true
+  });
+  const [editingWorkspaceId, setEditingWorkspaceId] = useState<string | null>(null);
+  const [editingName, setEditingName] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const activeProject = useMemo(() => {
+    return projects.find((project) => project.id === projectId) ?? null;
+  }, [projectId, projects]);
 
   return (
-    <aside className="flex h-full w-[320px] flex-col gap-5">
-      <Card className="overflow-hidden">
-        <CardHeader className="border-b border-white/10">
-          <div>
-            <p className="text-xs uppercase tracking-[0.28em] text-teal-300/70">
-              Workspaces
-            </p>
-            <h1 className="mt-2 text-2xl font-semibold text-white">Agent Workbench</h1>
-          </div>
-          <Badge className="border-teal-400/30 bg-teal-400/10 text-teal-100">
-            Linux-first
-          </Badge>
-        </CardHeader>
-        <CardContent className="space-y-4 pt-5">
-          {snapshot.workspaces.map((workspace) => {
-            const projects = snapshot.projects.filter(
-              (project) => project.project.workspaceId === workspace.id
+    <aside className="fd-panel fd-sidebar">
+      <div className="fd-workspace-tabs" role="tablist" aria-label="Workspaces">
+        {workspaces.map((workspace) => {
+          const isEditing = editingWorkspaceId === workspace.id;
+
+          function startEditing() {
+            setEditingWorkspaceId(workspace.id);
+            setEditingName(workspace.name);
+            setTimeout(() => {
+              inputRef.current?.select();
+            }, 0);
+          }
+
+          function commitRename() {
+            const trimmed = editingName.trim();
+            if (trimmed && trimmed !== workspace.name) {
+              onWorkspaceRename(workspace.id, trimmed);
+            }
+            setEditingWorkspaceId(null);
+          }
+
+          if (isEditing) {
+            return (
+              <div
+                className={`fd-workspace-tab active fd-workspace-tab--editing`}
+                key={workspace.id}
+                role="tab"
+                aria-selected
+              >
+                <input
+                  ref={inputRef}
+                  className="fd-workspace-tab-input"
+                  value={editingName}
+                  onChange={(e) => setEditingName(e.target.value)}
+                  onBlur={commitRename}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") commitRename();
+                    if (e.key === "Escape") setEditingWorkspaceId(null);
+                  }}
+                />
+              </div>
             );
+          }
+
+          return (
+            <button
+              aria-selected={workspace.id === workspaceId}
+              className={`fd-workspace-tab ${workspace.id === workspaceId ? "active" : ""}`}
+              key={workspace.id}
+              onClick={() => onWorkspaceChange(workspace.id)}
+              onDoubleClick={startEditing}
+              role="tab"
+              type="button"
+            >
+              <span>{workspace.name}</span>
+              <span className="count">{workspace.count}</span>
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="fd-scroll fd-sidebar-body">
+        <div className="fd-section-header">
+          <span className="label">Projects</span>
+          <span className="value">{projects.length}</span>
+        </div>
+
+        <div className="fd-project-list">
+          {projects.map((project) => {
+            const isActive = project.id === projectId;
+            const isExpanded = expandedProjects[project.id] ?? isActive;
 
             return (
-              <div key={workspace.id} className="rounded-xl border border-white/8 bg-white/[0.03] p-3">
-                <div className="mb-3 flex items-center gap-2">
-                  <Layers3 className="size-4 text-teal-300" />
-                  <span className="text-sm font-medium text-white">{workspace.name}</span>
+              <div className="fd-project-block" key={project.id}>
+                <div className={`fd-project-row ${isActive ? "active" : ""}`}>
+                  <button
+                    className="fd-project-row-main"
+                    onClick={() => {
+                      onProjectChange(project.id);
+                      setExpandedProjects((current) => ({
+                        ...current,
+                        [project.id]: !current[project.id]
+                      }));
+                    }}
+                    type="button"
+                  >
+                    <ForgeIcon
+                      name={isExpanded ? "folderOpen" : "folder"}
+                      size={12}
+                    />
+                    <span className="fd-project-name">{project.name}</span>
+                    <span className="fd-project-badges">
+                      {project.errors > 0 ? (
+                        <span className="fd-inline-badge error">
+                          <StateDot state="error" />
+                          {project.errors}
+                        </span>
+                      ) : null}
+                      {project.waiting > 0 ? (
+                        <span className="fd-inline-badge waiting">
+                          <StateDot state="waiting" />
+                          {project.waiting}
+                        </span>
+                      ) : null}
+                      {project.changed > 0 ? (
+                        <span className="fd-inline-badge changed">{project.changed}</span>
+                      ) : null}
+                    </span>
+                  </button>
+                  <button
+                    className="fd-project-remove"
+                    onClick={() => {
+                      if (window.confirm(`Remover "${project.name}" do workspace?\n\nEsta ação não pode ser desfeita.`)) {
+                        onRemoveProject(project.id);
+                      }
+                    }}
+                    title="Remover projeto"
+                    type="button"
+                  >
+                    ×
+                  </button>
                 </div>
-                <div className="space-y-2">
-                  {projects.map(({ project }) => (
-                    <button
-                      key={project.id}
-                      className={`w-full rounded-xl border px-3 py-3 text-left transition ${
-                        selectedProjectId === project.id
-                          ? "border-teal-400/45 bg-teal-400/12 text-white"
-                          : "border-white/8 bg-slate-950/50 text-slate-300 hover:border-white/15 hover:text-white"
-                      }`}
-                      onClick={() => setSelectedProject(project.id)}
-                      type="button"
-                    >
-                      <p className="text-sm font-medium">{project.name}</p>
-                      <p className="mt-1 truncate text-xs text-slate-400">{project.path}</p>
-                    </button>
-                  ))}
-                </div>
+
+                {isExpanded ? (
+                  <div className="fd-project-submenu">
+                    <div className="fd-project-subrow">
+                      <ForgeIcon name="terminal" size={11} />
+                      <span>Terminals</span>
+                      <span className="count">{project.terminals}</span>
+                    </div>
+                    <div className="fd-project-subrow">
+                      <ForgeIcon name="diff" size={11} />
+                      <span>Changes</span>
+                      <span className="count">{project.changed}</span>
+                    </div>
+                    <div className="fd-project-subrow">
+                      <ForgeIcon name="history" size={11} />
+                      <span>History</span>
+                      <span className="branch">{project.branch}</span>
+                    </div>
+                  </div>
+                ) : null}
               </div>
             );
           })}
-        </CardContent>
-      </Card>
+        </div>
+      </div>
 
-      <Card className="min-h-0 flex-1">
-        <CardHeader className="border-b border-white/10">
-          <div>
-            <p className="text-xs uppercase tracking-[0.28em] text-amber-300/70">
-              Active Agents
-            </p>
-            <h2 className="mt-1 text-lg font-semibold text-white">Global queue</h2>
+      <div className="fd-sidebar-footer">
+        <button className="fd-secondary-button" onClick={onAddProject} type="button">
+          <ForgeIcon name="plus" size={12} />
+          Add project
+        </button>
+
+        {importError ? <div className="fd-sidebar-hint">{importError}</div> : null}
+
+        {activeProject ? (
+          <div className="fd-sidebar-hint">
+            <span className="mono">{activeProject.path}</span>
           </div>
-          <Sparkles className="size-4 text-amber-300" />
-        </CardHeader>
-        <CardContent className="min-h-0 pt-4">
-          <ScrollArea className="h-[calc(100vh-27rem)] pr-2">
-            <div className="space-y-3">
-              {snapshot.activeAgents.map((agent) => (
-                <div
-                  key={agent.sessionId}
-                  className="rounded-xl border border-white/8 bg-white/[0.03] p-3"
-                >
-                  <div className="flex items-center justify-between gap-3">
-                    <p className="text-sm font-medium text-white">{agent.terminalName}</p>
-                    <Badge>{agent.state}</Badge>
-                  </div>
-                  <p className="mt-2 text-xs text-slate-400">{agent.projectName}</p>
-                </div>
-              ))}
-              {snapshot.activeAgents.length === 0 ? (
-                <div className="rounded-xl border border-dashed border-white/10 p-4 text-sm text-slate-400">
-                  Nenhum agente ativo ainda. Abra um terminal de projeto.
-                </div>
-              ) : null}
-            </div>
-          </ScrollArea>
-          <Button
-            className="mt-4 w-full"
-            variant="outline"
-            onClick={() => window.location.reload()}
-          >
-            <FolderGit2 className="mr-2 size-4" />
-            Refresh snapshot
-          </Button>
-        </CardContent>
-      </Card>
+        ) : null}
+      </div>
     </aside>
   );
 }

@@ -48,8 +48,15 @@ Definir identidade do projeto, modo de segurança, comando da IDE e templates de
 
 ## Fallback
 
-Se o arquivo não existir, o sistema gera uma configuração default em memória com:
+Se o arquivo não existir, o sistema gera uma configuração default auditável e escreve `.agent-workspace.json` na raiz do projeto com:
 
 - `safeMode: "audit"`
 - `ide.command: "phpstorm"`
 - templates `Shell`, `Codex` e `Claude`
+
+## Sync local
+
+- Toda leitura do arquivo passa por validação Zod.
+- `project`, `safeMode` e `ide.command` são sincronizados com a tabela `projects` no SQLite local.
+- O comando da IDE usado pelo main process sempre vem da configuração validada do projeto.
+- Os templates em `terminals` abastecem a UI para criação de sessões pré-configuradas.

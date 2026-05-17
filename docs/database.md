@@ -11,6 +11,11 @@
 
 ## Schema
 
+### `schema_migrations`
+
+- `name TEXT PRIMARY KEY`
+- `applied_at TEXT NOT NULL`
+
 ### `workspaces`
 
 - `id TEXT PRIMARY KEY`
@@ -50,11 +55,22 @@
 - `content TEXT NOT NULL`
 - `created_at TEXT NOT NULL`
 
+### `project_layouts`
+
+- `project_id TEXT PRIMARY KEY`
+- `active_session_id TEXT`
+- `terminal_mode TEXT NOT NULL`
+- `diff_mode TEXT NOT NULL`
+- `selected_file_path TEXT`
+- `updated_at TEXT NOT NULL`
+
 ## Persistência do MVP
 
 - Workspaces
 - Projetos adicionados
+- Metadados sincronizados da configuração por projeto (`name`, `safeMode`, `ideCommand`)
 - Sessões de terminal
+- Layout básico por projeto
 - Output persistido por chunks
 - Exit code e timestamps
 

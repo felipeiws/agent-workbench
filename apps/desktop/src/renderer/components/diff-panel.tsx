@@ -1,84 +1,341 @@
-import { Columns2, Rows3 } from "lucide-react";
+import { useMemo } from "react";
 
-import { Badge, Button, Card, CardContent, CardHeader } from "@agent-workbench/ui";
+import { ForgeIcon } from "./forge-icons";
+import type { DiffLine, DiffPreview, FileHistoryEntry } from "@agent-workbench/types";
 
-import { useWorkbenchStore } from "@/lib/store";
+export type DiffMode = "side" | "inline";
 
-export function DiffPanel() {
-  const snapshot = useWorkbenchStore((state) => state.snapshot);
-  const selectedProjectId = useWorkbenchStore((state) => state.selectedProjectId);
-  const diffMode = useWorkbenchStore((state) => state.diffMode);
-  const setDiffMode = useWorkbenchStore((state) => state.setDiffMode);
+interface SideBySideRow {
+  left: DiffLine | null;
+  right: DiffLine | null;
+}
 
-  const project = snapshot?.projects.find((item) => item.project.id === selectedProjectId);
-  const diff = project?.git.diff;
+interface DiffPanelProps {
+  diffMode: DiffMode;
+  diff: DiffPreview | undefined;
+  absoluteFilePath?: string;
+  filePath: string;
+  ideError?: string | null;
+  ideName: string;
+  commits: FileHistoryEntry[];
+  selectedCommitHash?: string | null;
+  onDiffModeChange: (mode: DiffMode) => void;
+  onOpenFileInIde: () => void;
+  onOpenProjectInIde: () => void;
+  onSelectCommit?: (hash: string | null) => void;
+}
 
-  if (!project || !diff) {
-    return null;
-  }
+export function DiffPanel({
+  diffMode,
+  diff,
+  absoluteFilePath,
+  filePath,
+  ideError,
+  ideName,
+  commits,
+  selectedCommitHash,
+  onDiffModeChange,
+  onOpenFileInIde,
+  onOpenProjectInIde,
+  onSelectCommit
+}: DiffPanelProps) {
+  const stats = useMemo(() => {
+    if (!diff) return { add: 0, del: 0 };
+    return {
+      add: diff.lines.filter((l) => l.type === "add").length,
+      del: diff.lines.filter((l) => l.type === "remove").length
+    };
+  }, [diff]);
 
-  const rows = Math.max(diff.original.length, diff.updated.length);
+  const [directory, fileName] = splitPath(filePath);
 
   return (
-    <Card className="min-h-[340px]">
-      <CardHeader className="border-b border-white/10">
-        <div>
-          <p className="text-xs uppercase tracking-[0.28em] text-sky-300/70">Diff</p>
-          <h3 className="mt-1 text-xl font-semibold text-white">{diff.filePath}</h3>
+    <section className="fd-panel fd-diff-panel">
+      <div className="fd-diff-head">
+        <div className="fd-diff-title">
+          <ForgeIcon name="diff" size={12} />
+          <span className="dir">{directory}</span>
+          <span className="file">{fileName}</span>
+          {diff?.isNewFile && (
+            <span className="fd-new-file-badge">NEW</span>
+          )}
+          {!diff?.isBinary && (
+            <span className="fd-diff-stats">
+              <span className="add">+{stats.add}</span>
+              <span className="del">−{stats.del}</span>
+            </span>
+          )}
         </div>
-        <div className="flex items-center gap-2">
-          <Button
-            variant={diffMode === "side-by-side" ? "default" : "outline"}
-            size="sm"
-            onClick={() => setDiffMode("side-by-side")}
+
+        <div className="fd-diff-modes">
+          {selectedCommitHash && onSelectCommit && (
+            <button
+              className="fd-commit-back-btn"
+              onClick={() => onSelectCommit(null)}
+              type="button"
+            >
+              ← Current
+            </button>
+          )}
+          <button
+            className={diffMode === "side" ? "active" : ""}
+            onClick={() => onDiffModeChange("side")}
+            type="button"
           >
-            <Columns2 className="mr-2 size-4" />
-            Side by side
-          </Button>
-          <Button
-            variant={diffMode === "inline" ? "default" : "outline"}
-            size="sm"
-            onClick={() => setDiffMode("inline")}
+            Side-by-side
+          </button>
+          <button
+            className={diffMode === "inline" ? "active" : ""}
+            onClick={() => onDiffModeChange("inline")}
+            type="button"
           >
-            <Rows3 className="mr-2 size-4" />
             Inline
-          </Button>
+          </button>
         </div>
-      </CardHeader>
-      <CardContent className="grid gap-4 pt-5">
-        {diffMode === "side-by-side" ? (
-          <div className="grid gap-4 lg:grid-cols-2">
-            <div className="rounded-2xl border border-rose-400/18 bg-rose-400/6 p-4">
-              <Badge className="mb-3 border-rose-400/25 bg-rose-400/10 text-rose-100">
-                Before
-              </Badge>
-              <div className="space-y-2 font-mono text-xs text-rose-50/90">
-                {Array.from({ length: rows }).map((_, index) => (
-                  <p key={`before-${index}`}>{diff.original[index] ?? ""}</p>
-                ))}
-              </div>
-            </div>
-            <div className="rounded-2xl border border-emerald-400/18 bg-emerald-400/6 p-4">
-              <Badge className="mb-3 border-emerald-400/25 bg-emerald-400/10 text-emerald-100">
-                After
-              </Badge>
-              <div className="space-y-2 font-mono text-xs text-emerald-50/90">
-                {Array.from({ length: rows }).map((_, index) => (
-                  <p key={`after-${index}`}>{diff.updated[index] ?? ""}</p>
-                ))}
-              </div>
-            </div>
-          </div>
+      </div>
+
+      <div className="fd-scroll fd-diff-body">
+        {diff ? (
+          <DiffBody diff={diff} mode={diffMode} absoluteFilePath={absoluteFilePath} />
         ) : (
-          <div className="rounded-2xl border border-white/8 bg-slate-950/75 p-4 font-mono text-xs">
-            {diff.updated.map((line, index) => (
-              <p key={`inline-${index}`} className="text-emerald-50/90">
-                + {line}
-              </p>
-            ))}
+          <div className="fd-empty-state">
+            <ForgeIcon name="diff" size={24} />
+            <span>Select a file to inspect the diff.</span>
           </div>
         )}
-      </CardContent>
-    </Card>
+      </div>
+
+      <HistoryPanel
+        commits={commits}
+        ideError={ideError}
+        ideName={ideName}
+        selectedCommitHash={selectedCommitHash}
+        onOpenFileInIde={onOpenFileInIde}
+        onOpenProjectInIde={onOpenProjectInIde}
+        onSelectCommit={onSelectCommit}
+      />
+    </section>
   );
+}
+
+function DiffBody({
+  diff,
+  mode,
+  absoluteFilePath
+}: {
+  diff: DiffPreview;
+  mode: DiffMode;
+  absoluteFilePath?: string;
+}) {
+  if (diff.isImage && absoluteFilePath) {
+    return (
+      <div className="fd-diff-image-preview">
+        <img
+          alt={diff.filePath}
+          src={`file://${absoluteFilePath}`}
+        />
+      </div>
+    );
+  }
+
+  if (diff.isBinary) {
+    return (
+      <div className="fd-diff-binary">
+        <ForgeIcon name="binary" size={20} />
+        <span>Binary file – cannot display</span>
+      </div>
+    );
+  }
+
+  if (diff.isTruncated && diff.lines.length === 0) {
+    return (
+      <div className="fd-diff-binary">
+        <ForgeIcon name="fileLarge" size={20} />
+        <span>File is too large to display</span>
+      </div>
+    );
+  }
+
+  if (diff.lines.length === 0) {
+    return (
+      <div className="fd-empty-state">
+        <ForgeIcon name="diff" size={24} />
+        <span>No changes.</span>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <DiffLinesView lines={diff.lines} mode={mode} />
+      {diff.isTruncated && diff.totalLines !== undefined && (
+        <div className="fd-diff-truncated">
+          Showing first 2 000 of {diff.totalLines.toLocaleString()} lines
+        </div>
+      )}
+    </>
+  );
+}
+
+function DiffLinesView({ lines, mode }: { lines: DiffLine[]; mode: DiffMode }) {
+  if (mode === "inline") {
+    return (
+      <table className="fd-diff-table inline">
+        <tbody>
+          {lines.map((line, index) => (
+            <tr className={`row ${line.type}`} key={index}>
+              <td className="no">{line.oldLineNo ?? ""}</td>
+              <td className="no">{line.newLineNo ?? ""}</td>
+              <td className="marker">
+                {line.type === "add" ? "+" : line.type === "remove" ? "−" : " "}
+              </td>
+              <td className={`code ${line.type}`}>{line.content}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    );
+  }
+
+  const rows = toSideBySideRows(lines);
+
+  return (
+    <table className="fd-diff-table side">
+      <tbody>
+        {rows.map((row, index) => (
+          <tr className="row" key={index}>
+            <td className={`no ${row.left?.type === "remove" ? "del" : ""}`}>
+              {row.left?.oldLineNo ?? ""}
+            </td>
+            <td className={`marker ${row.left?.type === "remove" ? "del" : ""}`}>
+              {row.left?.type === "remove" ? "−" : " "}
+            </td>
+            <td className={`code ${row.left?.type === "remove" ? "del" : ""}`}>
+              {row.left?.content ?? ""}
+            </td>
+            <td className={`no ${row.right?.type === "add" ? "add" : ""}`}>
+              {row.right?.newLineNo ?? ""}
+            </td>
+            <td className={`marker ${row.right?.type === "add" ? "add" : ""}`}>
+              {row.right?.type === "add" ? "+" : " "}
+            </td>
+            <td className={`code ${row.right?.type === "add" ? "add" : ""}`}>
+              {row.right?.content ?? ""}
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function toSideBySideRows(lines: DiffLine[]): SideBySideRow[] {
+  const rows: SideBySideRow[] = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line) break;
+
+    if (line.type === "context") {
+      rows.push({ left: line, right: line });
+      i++;
+      continue;
+    }
+
+    const removes: DiffLine[] = [];
+    const adds: DiffLine[] = [];
+
+    while (i < lines.length) {
+      const current = lines[i];
+      if (!current || current.type === "context") break;
+      if (current.type === "remove") {
+        removes.push(current);
+      } else {
+        adds.push(current);
+      }
+      i++;
+    }
+
+    const maxLen = Math.max(removes.length, adds.length);
+    for (let j = 0; j < maxLen; j++) {
+      rows.push({ left: removes[j] ?? null, right: adds[j] ?? null });
+    }
+  }
+
+  return rows;
+}
+
+function HistoryPanel({
+  commits,
+  ideError,
+  ideName,
+  selectedCommitHash,
+  onOpenFileInIde,
+  onOpenProjectInIde,
+  onSelectCommit
+}: {
+  commits: FileHistoryEntry[];
+  ideError?: string | null;
+  ideName: string;
+  selectedCommitHash?: string | null;
+  onOpenFileInIde: () => void;
+  onOpenProjectInIde: () => void;
+  onSelectCommit?: (hash: string | null) => void;
+}) {
+  return (
+    <div className="fd-history-panel">
+      <div className="fd-history-head">
+        <div className="fd-panel-title">
+          Quick history <span className="count">{commits.length}</span>
+        </div>
+        <div className="fd-history-actions">
+          <button className="fd-secondary-button" onClick={onOpenFileInIde} type="button">
+            <ForgeIcon name="external" size={11} />
+            Open in {ideName}
+          </button>
+          <button className="fd-secondary-button" onClick={onOpenProjectInIde} type="button">
+            Open project
+          </button>
+        </div>
+      </div>
+      {ideError ? (
+        <div className="fd-git-error">
+          <ForgeIcon name="alert" size={11} />
+          <span>{ideError}</span>
+        </div>
+      ) : null}
+
+      <div className="fd-scroll fd-history-list">
+        {commits.map((commit, index) => {
+          const isSelected = commit.hash === selectedCommitHash;
+          return (
+            <button
+              className={`fd-commit-row ${index === 0 ? "head" : ""} ${isSelected ? "selected" : ""}`}
+              key={commit.hash}
+              onClick={() => onSelectCommit?.(isSelected ? null : commit.hash)}
+              type="button"
+            >
+              <span className="graph-dot" />
+              <span className="hash">{commit.hash}</span>
+              <span className="message">
+                <span className="author">{commit.author}</span>
+                {commit.message}
+              </span>
+              <span className="time">{commit.date}</span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function splitPath(filePath: string) {
+  const index = filePath.lastIndexOf("/");
+  if (index === -1) {
+    return ["", filePath];
+  }
+
+  return [filePath.slice(0, index + 1), filePath.slice(index + 1)];
 }

@@ -1,40 +1,79 @@
 import { execFile } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 
 import { DatabaseClient } from "../../database/src/index";
 import { GitCliService } from "../../git/src/index";
+import { GitHubService } from "../../github/src/index";
+import { TaskLoopService } from "../../taskloop/src/index";
+import { watchProject } from "../../watcher/src/index";
 import {
   PROJECT_CONFIG_FILE,
   buildDefaultProjectConfig,
+  detectSuspiciousCommand,
   inferMultiAgentSuspicion,
   parseProjectConfig,
+  type AuditEventDetectedEvent,
   type CoreServices,
   type DiffRequestPayload,
+  type GitCommitDiffPayload,
+  type GitCommitPayload,
   type GitFilePayload,
+  type GitStatusChangedEvent,
   type IdeOpenPayload,
-  type SeedData,
+  type RenameWorkspacePayload,
+  type SaveProjectLayoutPayload,
   type TerminalCreatePayload,
   type TerminalInputPayload,
+  type TerminalRestartPayload,
   type TerminalResizePayload
 } from "../../shared/src/index";
 import { TerminalManager } from "../../terminal/src/index";
+import type { FSWatcher } from "chokidar";
 import type {
   ActiveAgentView,
+  AuditEvent,
   DiffPreview,
   FileHistoryEntry,
+  GitHubIssue,
+  GitHubIssueRecord,
   GitStatusGroup,
+  IssueDispatchEvent,
   LoadedProjectConfig,
+  ProjectGitHubConfig,
   ProjectId,
+  ProjectImportResult,
+  ProjectLayoutRecord,
   ProjectRecord,
   TerminalChunkRecord,
+  TerminalLifecycleState,
   TerminalSessionRecord,
   WorkspaceSnapshot
 } from "../../types/src/index";
 
 const execFileAsync = promisify(execFile);
+
+const ANSI_ESCAPE = /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g;
+
+const WAITING_INPUT_PATTERNS: RegExp[] = [
+  /\[y\/n\]/i,
+  /\(y\/n\)/i,
+  /\[yes\/no\]/i,
+  /press\s+(any\s+key|enter\b)/i,
+  /password\s*:/i,
+  /passphrase\s*:/i,
+  /\bproceed\?/i,
+  /\bcontinue\?/i,
+  /are\s+you\s+sure/i,
+  /do\s+you\s+want\s+to\b/i,
+];
+
+function detectsWaitingInput(content: string): boolean {
+  const plain = content.replace(ANSI_ESCAPE, "").replace(/\r/g, "");
+  return WAITING_INPUT_PATTERNS.some((pattern) => pattern.test(plain));
+}
 
 function sortActiveAgents(items: ActiveAgentView[]): ActiveAgentView[] {
   const rank: Record<ActiveAgentView["state"], number> = {
@@ -55,48 +94,107 @@ function sortActiveAgents(items: ActiveAgentView[]): ActiveAgentView[] {
   });
 }
 
-export async function openInIde(command: string, targetPath: string): Promise<void> {
+export async function openInIde(command: string, targetPath: string, line?: number): Promise<void> {
+  const args = line !== undefined ? ["--line", String(line), targetPath] : [targetPath];
   try {
-    await execFileAsync(command, [targetPath]);
-  } catch {
-    return;
+    await execFileAsync(command, args);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new Error(`IDE "${command}" not found. Make sure it is installed and available in PATH.`);
+    }
+    // Non-zero exit is expected when the IDE is already running and takes focus
+  }
+}
+
+function writeProjectConfigFile(path: string, config: LoadedProjectConfig["config"]): void {
+  writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+}
+
+export class WatcherService {
+  private readonly events = new EventEmitter();
+  private readonly watchers = new Map<string, FSWatcher>();
+
+  constructor(
+    private readonly git: GitCliService,
+    private readonly db: DatabaseClient,
+    private readonly getActivityMap?: () => ReadonlyMap<string, number>
+  ) {}
+
+  watchProject(projectId: string, projectPath: string): void {
+    if (this.watchers.has(projectId)) {
+      return;
+    }
+
+    this.startWatcher(projectId, projectPath, false);
+  }
+
+  unwatchProject(projectId: string): void {
+    const watcher = this.watchers.get(projectId);
+    if (watcher) {
+      void watcher.close();
+      this.watchers.delete(projectId);
+    }
+  }
+
+  onGitStatusChanged(listener: (event: GitStatusChangedEvent) => void): void {
+    this.events.on("gitStatusChanged", listener);
+  }
+
+  private startWatcher(projectId: string, projectPath: string, polling: boolean): void {
+    const watcher = watchProject({
+      path: projectPath,
+      polling,
+      onChange: () => void this.handleChange(projectId, projectPath)
+    });
+
+    watcher.on("error", (err: unknown) => {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (!polling && (code === "ENOSPC" || code === "EMFILE")) {
+        void watcher.close();
+        this.watchers.delete(projectId);
+        this.startWatcher(projectId, projectPath, true);
+      }
+    });
+
+    this.watchers.set(projectId, watcher);
+  }
+
+  private async handleChange(projectId: string, projectPath: string): Promise<void> {
+    const groups = await this.git.getStatus(projectPath);
+    const sessions = this.db.listTerminalSessions(projectId);
+    const activityMap = this.getActivityMap?.() ?? new Map<string, number>();
+    const suspicion = inferMultiAgentSuspicion(sessions, activityMap);
+    this.events.emit("gitStatusChanged", { projectId, groups, suspicion });
   }
 }
 
 export class ProjectService {
+  private watcherService?: WatcherService;
+
   constructor(
     private readonly db: DatabaseClient,
     private readonly git: GitCliService
   ) {}
 
-  ensureSeed(seed: SeedData): void {
-    for (const workspaceName of seed.workspaces) {
-      if (!this.db.getWorkspaceByName(workspaceName)) {
-        this.db.createWorkspace(workspaceName);
-      }
+  setWatcher(watcherService: WatcherService): void {
+    this.watcherService = watcherService;
+  }
+
+  ensureDefaultWorkspace(): void {
+    if (this.db.listWorkspaces().length > 0) {
+      return;
     }
 
-    const workspaces = this.db.listWorkspaces();
+    this.db.createWorkspace("Local");
+  }
 
-    for (const project of seed.projects) {
-      if (this.db.getProjectByPath(project.path)) {
-        continue;
-      }
+  async renameWorkspace(payload: RenameWorkspacePayload): Promise<void> {
+    this.db.renameWorkspace(payload.workspaceId, payload.name);
+  }
 
-      const workspace = workspaces.find((item) => item.name === project.workspaceName);
-      if (!workspace) {
-        continue;
-      }
-
-      this.db.createProject({
-        workspaceId: workspace.id,
-        name: project.name,
-        path: project.path,
-        safeMode: "audit",
-        ideCommand: project.ideCommand,
-        configPath: join(project.path, PROJECT_CONFIG_FILE)
-      });
-    }
+  async removeProject(projectId: ProjectId): Promise<void> {
+    this.watcherService?.unwatchProject(projectId);
+    this.db.deleteProject(projectId);
   }
 
   async getProjectById(projectId: ProjectId): Promise<ProjectRecord> {
@@ -114,26 +212,113 @@ export class ProjectService {
     const configPath = project.configPath;
 
     if (!existsSync(configPath)) {
-      return parseProjectConfig(
-        buildDefaultProjectConfig(project.name),
+      const config = buildDefaultProjectConfig(project.name || basename(project.path));
+      mkdirSync(dirname(configPath), { recursive: true });
+      writeProjectConfigFile(configPath, config);
+
+      const loaded = parseProjectConfig(
+        config,
         configPath,
         "defaults"
       );
+
+      this.db.updateProjectConfig({
+        projectId: project.id,
+        name: loaded.config.project,
+        safeMode: loaded.config.safeMode,
+        ideCommand: loaded.config.ide.command
+      });
+
+      return loaded;
     }
 
     const raw = JSON.parse(readFileSync(configPath, "utf8")) as unknown;
-    return parseProjectConfig(raw, configPath, "file");
+    const loaded = parseProjectConfig(raw, configPath, "file");
+
+    this.db.updateProjectConfig({
+      projectId: project.id,
+      name: loaded.config.project,
+      safeMode: loaded.config.safeMode,
+      ideCommand: loaded.config.ide.command
+    });
+
+    return loaded;
+  }
+
+  async importProject(
+    projectPath: string,
+    workspaceId?: string
+  ): Promise<ProjectImportResult> {
+    if (!existsSync(projectPath)) {
+      throw new Error("Selected folder does not exist anymore.");
+    }
+
+    if (!statSync(projectPath).isDirectory()) {
+      throw new Error("Selected path is not a folder.");
+    }
+
+    if (!(await this.git.isGitRepository(projectPath))) {
+      throw new Error("Selected folder is not a Git project.");
+    }
+
+    const existing = this.db.getProjectByPath(projectPath);
+    if (existing) {
+      await this.getProjectConfig(existing.id);
+      this.watcherService?.watchProject(existing.id, projectPath);
+      return {
+        status: "imported",
+        projectId: existing.id,
+        workspaceId: existing.workspaceId
+      };
+    }
+
+    const workspace =
+      (workspaceId
+        ? this.db.listWorkspaces().find((item) => item.id === workspaceId)
+        : null) ??
+      this.db.getWorkspaceByName("Local") ??
+      this.db.createWorkspace("Local");
+
+    const project = this.db.createProject({
+      workspaceId: workspace.id,
+      name: basename(projectPath),
+      path: projectPath,
+      safeMode: "audit",
+      ideCommand: "phpstorm",
+      configPath: join(projectPath, PROJECT_CONFIG_FILE)
+    });
+
+    await this.getProjectConfig(project.id);
+    this.watcherService?.watchProject(project.id, projectPath);
+
+    return {
+      status: "imported",
+      projectId: project.id,
+      workspaceId: project.workspaceId
+    };
+  }
+
+  async getProjectLayout(projectId: ProjectId): Promise<ProjectLayoutRecord> {
+    await this.getProjectById(projectId);
+    return this.db.getProjectLayout(projectId);
+  }
+
+  async saveProjectLayout(
+    payload: SaveProjectLayoutPayload
+  ): Promise<ProjectLayoutRecord> {
+    await this.getProjectById(payload.projectId);
+    return this.db.saveProjectLayout(payload);
   }
 
   async listActiveAgents(): Promise<ActiveAgentView[]> {
     const projects = this.db.listProjects();
     const projectMap = new Map(projects.map((project) => [project.id, project]));
-    const active = this.db.listTerminalSessions().filter((session) => {
-      return session.state !== "completed";
-    });
+    const sessions = this.db.listTerminalSessions().filter(
+      (session) => !(session.state === "failed" && session.exitCode === -1)
+    );
 
     return sortActiveAgents(
-      active.map((session) => ({
+      sessions.map((session) => ({
         sessionId: session.id,
         projectId: session.projectId,
         projectName: projectMap.get(session.projectId)?.name ?? "Unknown",
@@ -151,24 +336,28 @@ export class ProjectService {
 
     const projectSnapshots = await Promise.all(
       projects.map(async (project) => {
-        const groups = await this.git.getStatus(project.path);
-        const primaryFile = groups[0]?.items[0]?.path ?? "src/main.ts";
-        const [config, diff, history] = await Promise.all([
-          this.getProjectConfig(project.id),
-          this.git.getDiff(project.path, primaryFile, "side-by-side"),
-          this.git.getHistory(project.path, primaryFile)
+        const config = await this.getProjectConfig(project.id);
+        const syncedProject = await this.getProjectById(project.id);
+        const groups = await this.git.getStatus(syncedProject.path);
+        const primaryItem = groups[0]?.items[0];
+        const primaryFile = primaryItem?.path ?? "";
+        const primaryStaged = primaryItem?.status === "staged";
+        const [diff, history] = await Promise.all([
+          this.git.getDiff(syncedProject.path, primaryFile, "side-by-side", primaryStaged),
+          this.git.getHistory(syncedProject.path, primaryFile)
         ]);
 
-        const projectSessions = sessions.filter((session) => session.projectId === project.id);
+        const projectSessions = sessions.filter((session) => session.projectId === syncedProject.id);
 
         return {
-          project,
+          project: syncedProject,
+          layout: this.db.getProjectLayout(syncedProject.id),
           config,
           git: {
             groups,
             diff,
             history,
-            suspicion: inferMultiAgentSuspicion(project, projectSessions)
+            suspicion: inferMultiAgentSuspicion(projectSessions)
           },
           sessions: projectSessions
         };
@@ -183,22 +372,43 @@ export class ProjectService {
   }
 
   async openIde(payload: IdeOpenPayload): Promise<void> {
+    await this.getProjectConfig(payload.projectId);
     const project = await this.getProjectById(payload.projectId);
     const targetPath = payload.filePath ? join(project.path, payload.filePath) : project.path;
-    await openInIde(project.ideCommand, targetPath);
+    await openInIde(project.ideCommand, targetPath, payload.line);
+  }
+
+  async saveGitHubConfig(projectId: ProjectId, github: ProjectGitHubConfig | null): Promise<LoadedProjectConfig> {
+    const project = await this.getProjectById(projectId);
+    const current = await this.getProjectConfig(projectId);
+    const { github: _removed, ...rest } = current.config;
+    const nextConfig = github ? { ...rest, github } : rest;
+    writeProjectConfigFile(project.configPath, nextConfig);
+    return this.getProjectConfig(projectId);
   }
 }
 
 export class TerminalService {
   private readonly events = new EventEmitter();
+  private readonly lastActivityAt = new Map<string, number>();
+  private readonly inputBuffers = new Map<string, string>();
 
   constructor(
     private readonly db: DatabaseClient,
     private readonly projectService: ProjectService,
-    private readonly terminalManager: TerminalManager
+    private readonly terminalManager: TerminalManager,
+    private readonly auditService?: AuditService
   ) {
     this.terminalManager.on("output", (event: { sessionId: string; stream: "stdout" | "stderr" | "system"; content: string }) => {
+      this.lastActivityAt.set(event.sessionId, Date.now());
       const chunk = this.db.appendTerminalChunk(event.sessionId, event.stream, event.content);
+
+      const session = this.db.getTerminalSessionById(event.sessionId);
+      if (session?.state === "running" && detectsWaitingInput(event.content)) {
+        this.db.updateTerminalSessionState(event.sessionId, "waiting-input");
+        this.events.emit("stateChange", { sessionId: event.sessionId, state: "waiting-input" as TerminalLifecycleState });
+      }
+
       this.events.emit("output", {
         sessionId: event.sessionId,
         chunk
@@ -208,7 +418,40 @@ export class TerminalService {
     this.terminalManager.on("exit", (event: { sessionId: string; exitCode: number }) => {
       const state = event.exitCode === 0 ? "completed" : "failed";
       this.db.updateTerminalSessionState(event.sessionId, state, event.exitCode);
+      this.syncProjectLayoutAfterSessionExit(event.sessionId, event.exitCode);
       this.events.emit("exit", event);
+    });
+  }
+
+  private syncProjectLayoutAfterSessionExit(sessionId: string, exitCode: number): void {
+    if (exitCode !== -1) {
+      return;
+    }
+
+    const session = this.db.getTerminalSessionById(sessionId);
+
+    if (!session) {
+      return;
+    }
+
+    const layout = this.db.getProjectLayout(session.projectId);
+
+    if (layout.activeSessionId !== sessionId) {
+      return;
+    }
+
+    const nextVisibleSession =
+      this.db
+        .listTerminalSessions(session.projectId)
+        .find((item) => item.id !== sessionId && !(item.state === "failed" && item.exitCode === -1)) ??
+      null;
+
+    this.db.saveProjectLayout({
+      projectId: session.projectId,
+      activeSessionId: nextVisibleSession?.id ?? null,
+      terminalMode: layout.terminalMode,
+      diffMode: layout.diffMode,
+      selectedFilePath: layout.selectedFilePath
     });
   }
 
@@ -231,13 +474,59 @@ export class TerminalService {
       command: payload.command
     });
 
+    const layout = this.db.getProjectLayout(payload.projectId);
+    this.db.saveProjectLayout({
+      projectId: payload.projectId,
+      activeSessionId: session.id,
+      terminalMode: layout.terminalMode,
+      diffMode: layout.diffMode,
+      selectedFilePath: layout.selectedFilePath
+    });
+
     return session;
+  }
+
+  async restart(payload: TerminalRestartPayload): Promise<TerminalSessionRecord> {
+    const previousSession = this.db.getTerminalSessionById(payload.sessionId);
+
+    if (!previousSession) {
+      throw new Error(`Terminal session ${payload.sessionId} not found`);
+    }
+
+    if (this.terminalManager.has(previousSession.id)) {
+      this.terminalManager.terminate(previousSession.id);
+      this.db.updateTerminalSessionState(previousSession.id, "failed", -1);
+    }
+
+    return this.createSession({
+      projectId: previousSession.projectId,
+      name: previousSession.name,
+      command: previousSession.command
+    });
   }
 
   async write(payload: TerminalInputPayload): Promise<void> {
     this.terminalManager.write(payload.sessionId, payload.input);
-    const state = payload.input.includes("\n") ? "running" : "waiting-input";
-    this.db.updateTerminalSessionState(payload.sessionId, state);
+
+    const buffered = (this.inputBuffers.get(payload.sessionId) ?? "") + payload.input;
+    const parts = buffered.split(/\r|\n/);
+    this.inputBuffers.set(payload.sessionId, parts[parts.length - 1] ?? "");
+
+    const completedLines = parts.slice(0, -1).filter((line) => line.trim().length > 0);
+    for (const line of completedLines) {
+      const session = this.db.getTerminalSessionById(payload.sessionId);
+      if (session) {
+        this.auditService?.record(payload.sessionId, session.projectId, line);
+      }
+    }
+
+    if (payload.input.includes("\n") || payload.input.includes("\r")) {
+      const session = this.db.getTerminalSessionById(payload.sessionId);
+      if (session?.state === "waiting-input") {
+        this.db.updateTerminalSessionState(payload.sessionId, "running");
+        this.events.emit("stateChange", { sessionId: payload.sessionId, state: "running" as TerminalLifecycleState });
+      }
+    }
   }
 
   async resize(payload: TerminalResizePayload): Promise<void> {
@@ -245,12 +534,21 @@ export class TerminalService {
   }
 
   async terminate(sessionId: string): Promise<void> {
-    this.terminalManager.terminate(sessionId);
+    if (this.terminalManager.has(sessionId)) {
+      this.terminalManager.terminate(sessionId);
+    }
+
+    this.inputBuffers.delete(sessionId);
     this.db.updateTerminalSessionState(sessionId, "failed", -1);
+    this.syncProjectLayoutAfterSessionExit(sessionId, -1);
   }
 
   async getOutput(sessionId: string): Promise<TerminalChunkRecord[]> {
     return this.db.getTerminalChunks(sessionId);
+  }
+
+  getLastActivityMap(): ReadonlyMap<string, number> {
+    return this.lastActivityAt;
   }
 
   onOutput(listener: (event: { sessionId: string; chunk: TerminalChunkRecord }) => void): void {
@@ -259,6 +557,10 @@ export class TerminalService {
 
   onExit(listener: (event: { sessionId: string; exitCode: number }) => void): void {
     this.events.on("exit", listener);
+  }
+
+  onStateChange(listener: (event: { sessionId: string; state: TerminalLifecycleState }) => void): void {
+    this.events.on("stateChange", listener);
   }
 }
 
@@ -293,28 +595,275 @@ export class GitServiceFacade {
     return this.git.getDiff(
       await this.projectPath(payload.projectId),
       payload.filePath,
-      payload.mode
+      payload.mode,
+      payload.staged
     );
   }
 
   async getHistory(payload: GitFilePayload): Promise<FileHistoryEntry[]> {
     return this.git.getHistory(await this.projectPath(payload.projectId), payload.filePath);
   }
+
+  async getCommitDiff(payload: GitCommitDiffPayload): Promise<DiffPreview> {
+    return this.git.getCommitDiff(
+      await this.projectPath(payload.projectId),
+      payload.commitHash,
+      payload.filePath,
+      payload.mode
+    );
+  }
+
+  async addToGitIgnore(payload: GitFilePayload): Promise<void> {
+    this.git.addToGitIgnore(await this.projectPath(payload.projectId), payload.filePath);
+  }
+
+  async commit(payload: GitCommitPayload): Promise<GitStatusGroup[]> {
+    return this.git.commit(await this.projectPath(payload.projectId), payload.message);
+  }
+
+  async getStagedDiff(projectId: string): Promise<string> {
+    return this.git.getStagedDiff(await this.projectPath(projectId));
+  }
 }
 
-export function createCoreServices(databaseFile: string, seed: SeedData): CoreServices {
+export class AuditService {
+  private readonly events = new EventEmitter();
+
+  constructor(private readonly db: DatabaseClient) {}
+
+  async listEvents(projectId: ProjectId): Promise<AuditEvent[]> {
+    return this.db.listAuditEvents(projectId);
+  }
+
+  record(sessionId: string, projectId: string, command: string): void {
+    const match = detectSuspiciousCommand(command);
+
+    if (!match) {
+      return;
+    }
+
+    const project = this.db.getProjectById(projectId);
+
+    if (!project || project.safeMode === "off") {
+      return;
+    }
+
+    const event = this.db.createAuditEvent({
+      sessionId,
+      projectId,
+      command,
+      risk: match.risk,
+      reason: match.reason
+    });
+
+    this.events.emit("auditEvent", { projectId, event } satisfies AuditEventDetectedEvent);
+  }
+
+  onAuditEvent(listener: (event: AuditEventDetectedEvent) => void): void {
+    this.events.on("auditEvent", listener);
+  }
+}
+
+function buildIssuePrompt(issue: GitHubIssue): string {
+  const body = issue.body?.trim() ?? "No description provided.";
+  return `GitHub Issue #${issue.number}: ${issue.title}\n\n${body}`;
+}
+
+function shellSingleQuote(s: string): string {
+  return `'${s.replace(/'/g, "'\\''")}'`;
+}
+
+export class GitHubDispatcher {
+  private readonly events = new EventEmitter();
+  private readonly githubService: GitHubService;
+  private readonly inFlight = new Set<string>();
+
+  constructor(
+    private readonly db: DatabaseClient,
+    private readonly projectService: ProjectService,
+    private readonly terminalService: TerminalService
+  ) {
+    this.githubService = new GitHubService();
+
+    this.githubService.onIssuePolled(({ projectId, issue }) => {
+      void this.executeDispatch(projectId, issue);
+    });
+  }
+
+  private dispatchKey(projectId: string, issueNumber: number): string {
+    return `${projectId}:${issueNumber}`;
+  }
+
+  private async getProjectGitHubConfig(projectId: string): Promise<ProjectGitHubConfig> {
+    const loaded = await this.projectService.getProjectConfig(projectId);
+
+    if (!loaded.config.github) {
+      throw new Error(`Project ${projectId} has no GitHub configuration`);
+    }
+
+    return loaded.config.github;
+  }
+
+  private async executeDispatch(projectId: string, issue: GitHubIssue): Promise<void> {
+    const key = this.dispatchKey(projectId, issue.number);
+
+    if (this.inFlight.has(key) || this.db.isIssueDispatched(projectId, issue.number)) {
+      return;
+    }
+
+    this.inFlight.add(key);
+
+    try {
+      const config = await this.getProjectGitHubConfig(projectId);
+      const agentCommand = config.agentCommand ?? "claude";
+      const prompt = buildIssuePrompt(issue);
+      const command = `${agentCommand} ${shellSingleQuote(prompt)}`;
+
+      const session = await this.terminalService.createSession({
+        projectId,
+        name: `Issue #${issue.number}`,
+        command
+      });
+
+      this.db.markIssueDispatched({
+        projectId,
+        issueNumber: issue.number,
+        title: issue.title,
+        sessionId: session.id
+      });
+
+      await this.githubService.postComment(
+        config,
+        issue.number,
+        `🤖 Agent Workbench picked up this issue and started a terminal session (\`${session.id}\`).`
+      );
+
+      const event: IssueDispatchEvent = { projectId, issue, sessionId: session.id };
+      this.events.emit("issueDispatched", event);
+    } finally {
+      this.inFlight.delete(key);
+    }
+  }
+
+  startWatchingProject(projectId: ProjectId, config: ProjectGitHubConfig): void {
+    if (!config.watchIssues) {
+      return;
+    }
+
+    this.githubService.startWatchingProject(projectId, config);
+  }
+
+  stopWatchingProject(projectId: ProjectId): void {
+    this.githubService.stopWatchingProject(projectId);
+  }
+
+  async listIssues(projectId: ProjectId): Promise<GitHubIssue[]> {
+    const config = await this.getProjectGitHubConfig(projectId);
+    return this.githubService.listIssues(projectId, config);
+  }
+
+  async dispatchIssue(projectId: ProjectId, issueNumber: number): Promise<IssueDispatchEvent> {
+    const config = await this.getProjectGitHubConfig(projectId);
+    const issue = await this.githubService.getIssue(config, issueNumber);
+    await this.executeDispatch(projectId, issue);
+
+    const record = this.db.listDispatchedIssues(projectId).find(
+      (item) => item.issueNumber === issueNumber
+    );
+
+    if (!record) {
+      throw new Error(`Dispatch of issue #${issueNumber} failed or was already dispatched`);
+    }
+
+    return { projectId, issue, sessionId: record.sessionId ?? "" };
+  }
+
+  listDispatched(projectId: ProjectId): GitHubIssueRecord[] {
+    return this.db.listDispatchedIssues(projectId);
+  }
+
+  onIssueDispatched(listener: (event: IssueDispatchEvent) => void): void {
+    this.events.on("issueDispatched", listener);
+  }
+}
+
+export function createCoreServices(databaseFile: string): CoreServices {
   const db = new DatabaseClient(databaseFile);
   const git = new GitCliService();
   const projectService = new ProjectService(db, git);
   const terminalManager = new TerminalManager();
-  const terminalService = new TerminalService(db, projectService, terminalManager);
+  const auditService = new AuditService(db);
+  const terminalService = new TerminalService(db, projectService, terminalManager, auditService);
   const gitService = new GitServiceFacade(db, git);
+  const watcherService = new WatcherService(git, db, () => terminalService.getLastActivityMap());
+  const githubDispatcher = new GitHubDispatcher(db, projectService, terminalService);
+  const taskLoopService = new TaskLoopService({
+    db,
+    getProjectPath: (projectId) => {
+      const project = db.getProjectById(projectId);
+      if (!project) throw new Error(`Project ${projectId} not found`);
+      return project.path;
+    },
+    createTerminalSession: (input) =>
+      terminalService.createSession({
+        projectId: input.projectId,
+        name: input.name,
+        command: input.command
+      }),
+    writeTerminal: (sessionId, input) => {
+      terminalManager.write(sessionId, input);
+    },
+    terminateTerminal: (sessionId) => terminalService.terminate(sessionId),
+    subscribeToOutput: (listener) => {
+      terminalService.onOutput((event) => {
+        listener({ sessionId: event.sessionId, content: event.chunk.content });
+      });
+    }
+  });
 
-  projectService.ensureSeed(seed);
+  projectService.setWatcher(watcherService);
+  projectService.ensureDefaultWorkspace();
+
+  for (const project of db.listProjects()) {
+    watcherService.watchProject(project.id, project.path);
+
+    void projectService.getProjectConfig(project.id).then((loaded) => {
+      if (loaded.config.github?.watchIssues) {
+        githubDispatcher.startWatchingProject(project.id, loaded.config.github);
+      }
+    });
+  }
 
   return {
+    auditService,
     projectService,
     terminalService,
-    gitService
+    gitService,
+    watcherService,
+    githubService: {
+      startWatchingProject: (projectId, config) =>
+        githubDispatcher.startWatchingProject(projectId, config),
+      stopWatchingProject: (projectId) =>
+        githubDispatcher.stopWatchingProject(projectId),
+      listIssues: (projectId) =>
+        githubDispatcher.listIssues(projectId),
+      dispatchIssue: (projectId, issueNumber) =>
+        githubDispatcher.dispatchIssue(projectId, issueNumber),
+      listDispatched: (projectId) =>
+        githubDispatcher.listDispatched(projectId),
+      onIssueDispatched: (listener) =>
+        githubDispatcher.onIssueDispatched(listener)
+    },
+    taskLoopService: {
+      start: (projectId, agent, definition) =>
+        taskLoopService.start(projectId, agent, definition),
+      pause: (loopId) => taskLoopService.pause(loopId),
+      resume: (loopId) => taskLoopService.resume(loopId),
+      stop: (loopId) => taskLoopService.stop(loopId),
+      delete: (loopId) => taskLoopService.delete(loopId),
+      list: (projectId) => taskLoopService.list(projectId),
+      getTasks: (loopId) => taskLoopService.getTasks(loopId),
+      onProgress: (listener) => taskLoopService.onProgress(listener)
+    }
   };
 }

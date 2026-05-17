@@ -16,7 +16,8 @@ O sistema é um monorepo com uma aplicação Electron que hospeda uma UI React. 
 ### `packages/core`
 
 - Compõe serviços.
-- Faz seed de workspaces e projetos.
+- Garante workspace local default quando o banco está vazio.
+- Importa projetos locais selecionados no Electron.
 - Carrega configuração do projeto.
 - Monta snapshots agregando DB + Git + heurísticas.
 - Orquestra abertura de IDE.
@@ -70,12 +71,16 @@ Eventos futuros previstos:
 3. `node-pty` sobe um shell `bash`.
 4. Output é persistido em `terminal_chunks`.
 5. Renderer recebe stream via IPC e escreve no xterm.
-6. Exit atualiza a sessão para `completed` ou `failed`.
+6. O renderer pode reidratar o xterm lendo `terminal_chunks` persistidos ao reabrir o app.
+7. Exit atualiza a sessão para `completed` ou `failed`.
+8. Kill manual fecha a aba visível, mas preserva a sessão e o histórico no SQLite para auditoria.
 
 ## Lifecycle de projeto
 
-1. Projeto é registrado localmente com path absoluto.
-2. Config loader tenta ler `.agent-workspace.json`.
-3. Se não houver arquivo, aplica config default auditável.
-4. Git facade agrega status, diff e histórico.
-5. Snapshot abastece a UI.
+1. Renderer solicita importação e o main abre um diálogo Electron para selecionar uma pasta local.
+2. `core` valida existência da pasta e se ela é um repositório Git.
+3. Projeto é registrado localmente com path absoluto no workspace selecionado.
+4. Config loader tenta ler `.agent-workspace.json`.
+5. Se não houver arquivo, gera e persiste config default auditável.
+6. Git facade agrega status, diff e histórico.
+7. Snapshot abastece a UI.

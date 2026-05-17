@@ -1,41 +1,48 @@
-import type {
-  AgentSuspicion,
-  ProjectRecord,
-  TerminalSessionRecord
-} from "../../types/src/index";
+import type { AgentSuspicion, TerminalSessionRecord } from "../../types/src/index";
 
-const FIVE_MINUTES = 5 * 60 * 1000;
+const RECENT_THRESHOLD_MS = 60 * 1_000;
+const MODERATE_THRESHOLD_MS = 5 * 60 * 1_000;
 
 export function inferMultiAgentSuspicion(
-  project: ProjectRecord,
-  sessions: TerminalSessionRecord[]
+  sessions: TerminalSessionRecord[],
+  recentActivityAt: ReadonlyMap<string, number> = new Map()
 ): AgentSuspicion | null {
-  const active = sessions.filter((session) => {
-    if (session.projectId !== project.id) {
-      return false;
-    }
+  const active = sessions.filter(
+    (s) => s.state === "running" || s.state === "waiting-input"
+  );
 
-    return session.state === "running" || session.state === "waiting-input";
-  });
-
-  if (active.length < 2) {
+  if (active.length === 0) {
     return null;
   }
 
   const now = Date.now();
-  const recent = active.filter((session) => {
-    return now - new Date(session.startedAt).getTime() <= FIVE_MINUTES;
+
+  const recentSessions = active.filter((s) => {
+    const lastAt = recentActivityAt.get(s.id) ?? 0;
+    return now - lastAt <= RECENT_THRESHOLD_MS;
   });
 
-  if (recent.length < 2) {
+  const moderateSessions = active.filter((s) => {
+    const lastAt = recentActivityAt.get(s.id) ?? new Date(s.startedAt).getTime();
+    return now - lastAt <= MODERATE_THRESHOLD_MS;
+  });
+
+  const candidates = recentSessions.length > 0 ? recentSessions : moderateSessions;
+
+  if (candidates.length === 0) {
     return null;
   }
 
-  const confidence = Math.min(0.95, 0.5 + recent.length * 0.15);
+  let confidence: number;
+  if (recentSessions.length > 0) {
+    confidence = Math.min(0.95, 0.8 + recentSessions.length * 0.05);
+  } else {
+    confidence = Math.min(0.75, 0.5 + moderateSessions.length * 0.1);
+  }
 
   return {
     label: "Multi-agent",
-    suspectedSource: recent.map((session) => session.name),
+    suspectedSource: candidates.map((s) => s.name),
     confidence: Number(confidence.toFixed(2))
   };
 }

@@ -1,4 +1,4 @@
-# Agent Workbench
+# Agent Workbench / ForgeDesk UI
 
 Mission Control para developers executarem múltiplos agentes de IA em terminais isolados por projeto, com observabilidade operacional, watch de mudanças Git, diff visual e histórico persistido localmente.
 
@@ -102,6 +102,13 @@ Saída esperada:
 - Spawn de PTYs Linux com `bash`
 - Git status, stage, unstage, diff e history via CLI
 - Modo `safeMode: audit`
+- UI mockada ForgeDesk com layout em quatro painéis e navegação desktop-first
+
+## UI atual
+
+- O renderer atual aplica o design ForgeDesk com mock data local para validar layout e estados visuais.
+- Dados da interface vivem em `apps/desktop/src/renderer/lib/forgedesk-mocks.ts`.
+- A integração completa do shell visual com PTY/Git reais pode ser feita depois sem quebrar os boundaries do monorepo.
 
 ## Troubleshooting
 

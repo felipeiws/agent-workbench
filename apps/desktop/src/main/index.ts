@@ -13,32 +13,8 @@ app.disableHardwareAcceleration();
 app.commandLine.appendSwitch("disable-gpu");
 app.commandLine.appendSwitch("disable-software-rasterizer");
 
-const seed = {
-  workspaces: ["DadosTech", "Clientes", "IA Lab"],
-  projects: [
-    {
-      workspaceName: "DadosTech",
-      name: "bridge",
-      path: "/home/felipe/Projetos/DadosTech",
-      ideCommand: "phpstorm"
-    },
-    {
-      workspaceName: "Clientes",
-      name: "flowisee-app",
-      path: "/home/felipe/Projetos/flowisee-app",
-      ideCommand: "phpstorm"
-    },
-    {
-      workspaceName: "IA Lab",
-      name: "open-design",
-      path: "/home/felipe/Projetos/open-design",
-      ideCommand: "phpstorm"
-    }
-  ]
-};
-
 function createWindow(): BrowserWindow {
-  const services = createCoreServices(join(app.getPath("userData"), "agent-workbench.db"), seed);
+  const services = createCoreServices(join(app.getPath("userData"), "agent-workbench.db"));
   const window = new BrowserWindow({
     width: 1680,
     height: 980,
@@ -47,7 +23,7 @@ function createWindow(): BrowserWindow {
     title: "Agent Workbench",
     backgroundColor: "#07111f",
     webPreferences: {
-      preload: join(__dirname, "../preload/index.js"),
+      preload: join(__dirname, "../preload/index.mjs"),
       sandbox: false,
       contextIsolation: true,
       nodeIntegration: false

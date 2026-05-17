@@ -15,12 +15,15 @@ const internalPackages = [
   "@agent-workbench/watcher"
 ];
 
+const tsFirstExtensions = [".mts", ".ts", ".tsx", ".mjs", ".js", ".jsx", ".json"];
+
 export default defineConfig({
   main: {
     ssr: {
       noExternal: internalPackages
     },
     resolve: {
+      extensions: tsFirstExtensions,
       alias: {
         "@agent-workbench/core": resolve(root, "packages/core/src/index.ts"),
         "@agent-workbench/database": resolve(root, "packages/database/src/index.ts"),
@@ -38,6 +41,7 @@ export default defineConfig({
       noExternal: internalPackages
     },
     resolve: {
+      extensions: tsFirstExtensions,
       alias: {
         "@agent-workbench/shared": resolve(root, "packages/shared/src/index.ts")
       }
@@ -48,6 +52,7 @@ export default defineConfig({
       noExternal: internalPackages
     },
     resolve: {
+      extensions: tsFirstExtensions,
       alias: {
         "@": resolve(__dirname, "src/renderer"),
         "@agent-workbench/shared": resolve(root, "packages/shared/src/index.ts"),

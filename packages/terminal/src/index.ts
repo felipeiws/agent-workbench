@@ -1,6 +1,12 @@
 import { EventEmitter } from "node:events";
+import { createRequire } from "node:module";
 
-import pty, { type IPty } from "node-pty";
+import type { IPty, spawn as PtySpawn } from "node-pty";
+
+const require = createRequire(import.meta.url);
+const pty = require("node-pty") as {
+  spawn: typeof PtySpawn;
+};
 
 export interface SpawnTerminalInput {
   id: string;
@@ -24,6 +30,7 @@ export interface TerminalExitMessage {
 interface ManagedTerminal {
   pty: IPty;
   name: string;
+  terminatedByUser: boolean;
 }
 
 export class TerminalManager extends EventEmitter {
@@ -54,16 +61,18 @@ export class TerminalManager extends EventEmitter {
     });
 
     instance.onExit(({ exitCode }) => {
+      const managed = this.sessions.get(input.id);
       this.sessions.delete(input.id);
       this.emit("exit", {
         sessionId: input.id,
-        exitCode
+        exitCode: managed?.terminatedByUser ? -1 : exitCode
       } satisfies TerminalExitMessage);
     });
 
     this.sessions.set(input.id, {
       pty: instance,
-      name: input.name
+      name: input.name,
+      terminatedByUser: false
     });
   }
 
@@ -76,8 +85,14 @@ export class TerminalManager extends EventEmitter {
   }
 
   terminate(sessionId: string): void {
-    this.sessions.get(sessionId)?.pty.kill();
-    this.sessions.delete(sessionId);
+    const session = this.sessions.get(sessionId);
+
+    if (!session) {
+      return;
+    }
+
+    session.terminatedByUser = true;
+    session.pty.kill();
   }
 
   has(sessionId: string): boolean {

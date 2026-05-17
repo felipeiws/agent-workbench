@@ -19,6 +19,7 @@ Ferramentas atuais de uso local com agentes tendem a fragmentar a operação: v�
 - Git changes, diff e history ao lado do terminal
 - Heurística explícita de suspeita “Multi-agent”
 - Configuração por projeto via `.agent-workspace.json`
+- UI de mission control densa e auditável com foco em desktop Linux-first
 
 ## Fluxo principal
 
@@ -37,3 +38,5 @@ Ferramentas atuais de uso local com agentes tendem a fragmentar a operação: v�
 - Navegação rápida entre projetos sem perder histórico.
 - Layout orientado a “mission control”, não a formulário.
 - Terminais com leitura confortável e contexto lateral permanente.
+- Shell principal em quatro painéis: Workspace, Terminals, Changes e Diff/History.
+- Safe mode e agentes ativos visíveis na topbar.

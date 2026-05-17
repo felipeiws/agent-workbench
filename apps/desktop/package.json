@@ -1,6 +1,8 @@
 {
   "name": "@agent-workbench/desktop",
   "version": "0.1.0",
+  "description": "Mission Control for developers running multiple AI agents in isolated project terminals.",
+  "author": "Felipe Pereira",
   "private": true,
   "type": "module",
   "main": "out/main/index.js",
@@ -15,17 +17,18 @@
     "@agent-workbench/core": "0.1.0",
     "@agent-workbench/database": "0.1.0",
     "@agent-workbench/git": "0.1.0",
+    "@agent-workbench/github": "0.1.0",
     "@agent-workbench/shared": "0.1.0",
     "@agent-workbench/terminal": "0.1.0",
     "@agent-workbench/types": "0.1.0",
     "@agent-workbench/ui": "0.1.0",
     "@agent-workbench/watcher": "0.1.0",
+    "@anthropic-ai/sdk": "^0.96.0",
     "@xterm/addon-fit": "^0.11.0",
     "better-sqlite3": "^11.10.0",
     "chokidar": "^4.0.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
-    "electron": "35.3.0",
     "lucide-react": "^0.511.0",
     "node-pty": "^1.0.0",
     "pino": "^9.7.0",
@@ -39,6 +42,7 @@
   },
   "devDependencies": {
     "autoprefixer": "^10.4.21",
+    "electron": "35.3.0",
     "electron-builder": "^26.0.12",
     "electron-vite": "^5.0.0",
     "postcss": "^8.5.3",
@@ -52,7 +56,13 @@
     },
     "files": [
       "out/**/*",
+      "node_modules/better-sqlite3/**/*",
+      "node_modules/node-pty/**/*",
       "package.json"
+    ],
+    "asarUnpack": [
+      "node_modules/better-sqlite3/**/*",
+      "node_modules/node-pty/**/*"
     ],
     "linux": {
       "target": [
@@ -63,7 +73,8 @@
           ]
         }
       ],
-      "category": "Development"
+      "category": "Development",
+      "icon": "build/icons"
     }
   }
 }
