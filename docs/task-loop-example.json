@@ -1,0 +1,27 @@
+{
+  "version": "1",
+  "name": "Implementar autenticação JWT",
+  "prePrompt": "/clear",
+  "postPrompt": null,
+  "idleTimeoutMs": 15000,
+  "tasks": [
+    {
+      "id": "task-1",
+      "title": "Criar middleware JWT",
+      "prompt": "Implemente o middleware de autenticação JWT em src/middleware/auth.ts. Ele deve verificar o token Bearer no header Authorization e rejeitar requisições sem token válido.",
+      "memoryNote": "Middleware JWT criado em src/middleware/auth.ts. Usa jsonwebtoken, segredo via JWT_SECRET."
+    },
+    {
+      "id": "task-2",
+      "title": "Endpoint de login",
+      "prompt": "Crie o endpoint POST /api/auth/login em src/routes/auth.ts. Recebe email e senha, valida contra o banco, retorna JWT com expiração de 24h.",
+      "memoryNote": "Endpoint POST /api/auth/login em src/routes/auth.ts. Retorna { token, expiresAt }."
+    },
+    {
+      "id": "task-3",
+      "title": "Proteger rotas",
+      "prompt": "Aplique o middleware JWT em todas as rotas /api/users e /api/admin usando o middleware criado anteriormente.",
+      "memoryNote": "Rotas /api/users e /api/admin protegidas com authMiddleware."
+    }
+  ]
+}
