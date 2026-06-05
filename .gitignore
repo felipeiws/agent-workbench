@@ -1,12 +1,49 @@
-node_modules
-dist
-out
-build
-release
-.DS_Store
-coverage
-*.log
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+out/
+build/
+release/
+
+# Test and coverage outputs
+coverage/
+.vitest/
+
+# TypeScript
 *.tsbuildinfo
+
+# Vite / Electron caches
+.vite/
+.electron-vite/
+apps/desktop/.vite/
+apps/desktop/.electron-vite/
+
+# Local app runtime data
 apps/desktop/dev.db
-apps/desktop/user-data
-.idea
+apps/desktop/*.db
+apps/desktop/*.db-*
+apps/desktop/user-data/
+
+# Environment files
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
