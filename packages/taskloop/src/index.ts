@@ -488,8 +488,19 @@ function buildTaskPrompt(input: {
 }
 
 function buildCodexExecShellCommand(prompt: string, taskStatusFile: string): string {
+  const codexCommand = [
+    "CODEX_BIN=codex;",
+    "if [ -s \"$HOME/.nvm/nvm.sh\" ]; then",
+    ". \"$HOME/.nvm/nvm.sh\";",
+    "NVM_NODE=$(nvm which current 2>/dev/null || true);",
+    "NVM_CODEX=${NVM_NODE%/node}/codex;",
+    "if [ -x \"$NVM_CODEX\" ]; then CODEX_BIN=\"$NVM_CODEX\"; fi;",
+    "fi;",
+    "\"$CODEX_BIN\""
+  ].join(" ");
   const agentCommand = [
-    "codex",
+    codexCommand,
+    "--no-alt-screen",
     "exec",
     "--dangerously-bypass-approvals-and-sandbox",
     "--skip-git-repo-check",

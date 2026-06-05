@@ -147,7 +147,9 @@ describe("TaskLoopService", () => {
     expect(loopRecords.get(loopId)?.sessionId).toBe("session-1");
     expect(loopTasks.get(0)?.status).toBe("running");
     expect(writes[0]?.sessionId).toBe("session-1");
-    expect(writes[0]?.input).toContain("codex exec");
+    expect(writes[0]?.input).toContain("NVM_CODEX=${NVM_NODE%/node}/codex");
+    expect(writes[0]?.input).toContain("\"$CODEX_BIN\" --no-alt-screen exec");
+    expect(writes[0]?.input).not.toContain("--model");
 
     const marker = JSON.parse(readFileSync(taskStatusFile, "utf8")) as { status: string };
     expect(marker.status).toBe("running");
