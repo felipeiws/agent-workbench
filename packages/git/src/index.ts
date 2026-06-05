@@ -314,6 +314,26 @@ export class GitCliService {
     return this.getStatus(projectPath);
   }
 
+  async push(projectPath: string, token?: string): Promise<void> {
+    try {
+      if (token) {
+        const remoteUrl = await runGit(projectPath, ["remote", "get-url", "origin"], "");
+        if (!remoteUrl) throw new Error("Sem remote 'origin' configurado.");
+
+        const branch = await runGit(projectPath, ["rev-parse", "--abbrev-ref", "HEAD"], "");
+        if (!branch || branch === "HEAD") throw new Error("Não foi possível determinar o branch atual.");
+
+        const urlWithToken = remoteUrl.replace(/^(https?:\/\/)/, `$1oauth2:${token}@`);
+        await execFileAsync("git", ["push", urlWithToken, `HEAD:${branch}`], { cwd: projectPath });
+      } else {
+        await execFileAsync("git", ["push"], { cwd: projectPath });
+      }
+    } catch (error) {
+      const err = error as { stderr?: string };
+      throw new Error(err.stderr?.trim() || "Git push falhou");
+    }
+  }
+
   addToGitIgnore(projectPath: string, filePath: string): void {
     const gitIgnorePath = join(projectPath, ".gitignore");
     const entry = filePath.replace(/\\/g, "/");

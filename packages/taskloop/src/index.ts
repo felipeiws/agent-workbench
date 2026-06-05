@@ -12,12 +12,23 @@ import type {
   TaskLoopTaskRecord,
   TaskLoopTaskStatus,
 } from "../../types/src/index";
-import type { TaskLoopProgressEvent } from "../../shared/src/index";
+import { type TaskLoopProgressEvent } from "../../shared/src/index";
 
 const FORGEDESK_DIR = ".forgedesk";
-const DEFAULT_IDLE_TIMEOUT_MS = 15000;
-const STARTUP_EXTRA_MS = 10000;
+const SHELL_BOOT_GRACE_MS = 150;
+const TASK_MARKER_POLL_MS = 1000;
 const ANSI_ESCAPE = /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g;
+
+type TaskCompletionMarkerStatus = TaskLoopTaskStatus | "running";
+
+interface TaskCompletionMarker {
+  taskId: string;
+  taskTitle: string;
+  status: TaskCompletionMarkerStatus;
+  updatedAt: string;
+  summary?: string;
+  failureReason?: string;
+}
 
 export interface TaskLoopTerminalOutput {
   sessionId: string;
@@ -84,42 +95,68 @@ export class TaskLoopService {
     });
 
     for (let i = 0; i < definition.tasks.length; i++) {
+      const taskDef = definition.tasks[i]!;
+      const taskStatusFile = join(tasksPath, `${i}_${sanitizeFilename(taskDef.title)}.json`);
+
       this.deps.db.createTaskLoopTask({
         loopId,
         taskIndex: i,
-        title: definition.tasks[i]!.title
+        title: taskDef.title
+      });
+
+      writeTaskMarker(taskStatusFile, {
+        taskId: taskDef.id,
+        taskTitle: taskDef.title,
+        status: "pending",
+        updatedAt: new Date().toISOString()
       });
     }
 
-    const agentCommand = agent === "claude"
-      ? "claude --dangerously-skip-permissions"
-      : "codex";
-
-    const session = await this.deps.createTerminalSession({
-      projectId,
-      name: `Loop: ${definition.name}`,
-      command: agentCommand
-    });
-
-    this.deps.db.updateTaskLoop(loopId, { sessionId: session.id });
-
-    void this.runLoop(loopId, session.id, definition, loopPath);
+    await this.spawnLoopSession(loopId, projectId, definition.name, agent, definition, loopPath, projectPath, 0);
 
     return this.deps.db.getTaskLoopById(loopId)!;
+  }
+
+  private async spawnLoopSession(
+    loopId: string,
+    projectId: string,
+    loopName: string,
+    agent: TaskLoopAgent,
+    definition: TaskLoopDefinition,
+    loopPath: string,
+    projectPath: string,
+    startIndex: number
+  ): Promise<void> {
+    const session = await this.deps.createTerminalSession({
+      projectId,
+      name: `Loop: ${loopName}`,
+      command: "bash"
+    });
+
+    this.deps.db.updateTaskLoop(loopId, {
+      sessionId: session.id,
+      status: "running",
+      currentTaskIndex: startIndex,
+      completedAt: null
+    });
+
+    void this.runLoop(loopId, session.id, agent, definition, loopPath, projectPath, startIndex);
   }
 
   private async runLoop(
     loopId: string,
     sessionId: string,
+    agent: TaskLoopAgent,
     definition: TaskLoopDefinition,
-    loopPath: string
+    loopPath: string,
+    projectPath: string,
+    startIndex = 0
   ): Promise<void> {
-    const idleMs = definition.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
+    // The loop session now boots into a plain bash shell. Give the PTY a brief
+    // moment to settle, but do not wait for shell output that may never come.
+    await sleep(SHELL_BOOT_GRACE_MS);
 
-    // Wait for agent to start up before sending anything
-    await this.waitForIdle(sessionId, idleMs + STARTUP_EXTRA_MS);
-
-    for (let i = 0; i < definition.tasks.length; i++) {
+    for (let i = startIndex; i < definition.tasks.length; i++) {
       if (this.stoppedLoops.has(loopId)) break;
 
       while (this.pausedLoops.has(loopId) && !this.stoppedLoops.has(loopId)) {
@@ -132,33 +169,78 @@ export class TaskLoopService {
       const taskRecord = this.deps.db.getTaskLoopTaskByIndex(loopId, i);
       if (!taskDef || !taskRecord) continue;
 
+      const taskBaseName = `${i}_${sanitizeFilename(taskDef.title)}`;
+      const taskOutputFile = join(loopPath, "tasks", `${taskBaseName}.txt`);
+      const taskStatusFile = join(loopPath, "tasks", `${taskBaseName}.json`);
+      const taskPromptFile = join(loopPath, "tasks", `${taskBaseName}.prompt.txt`);
+      const taskStatusRelativePath = toProjectRelativePath(projectPath, taskStatusFile);
+
       this.deps.db.updateTaskLoopTask(taskRecord.id, {
         status: "running",
         startedAt: new Date().toISOString()
+      });
+      writeTaskMarker(taskStatusFile, {
+        taskId: taskDef.id,
+        taskTitle: taskDef.title,
+        status: "running",
+        updatedAt: new Date().toISOString()
       });
       this.deps.db.updateTaskLoop(loopId, { currentTaskIndex: i });
       this.emitProgress(loopId, projectIdFromLoop(this.deps.db, loopId), "running", i, "running");
 
       const taskChunks: string[] = [];
       const collectOutput = (content: string) => taskChunks.push(content);
-      this.outputEmitter.on(`output:${sessionId}`, collectOutput);
 
       try {
-        if (definition.prePrompt) {
-          this.deps.writeTerminal(sessionId, `${definition.prePrompt}\r`);
-          await this.waitForIdle(sessionId, idleMs);
+        this.outputEmitter.on(`output:${sessionId}`, collectOutput);
+
+        const prompt = buildTaskPrompt({
+          prePrompt: definition.prePrompt,
+          postPrompt: definition.postPrompt,
+          taskPrompt: taskDef.prompt,
+          taskStatusRelativePath
+        });
+
+        writeFileSync(taskPromptFile, prompt, "utf8");
+
+        if (agent === "codex") {
+          this.deps.writeTerminal(
+            sessionId,
+            `${buildCodexExecShellCommand(prompt, taskStatusFile)}\r`
+          );
+        } else if (agent === "claude") {
+          this.deps.writeTerminal(
+            sessionId,
+            `${buildClaudeShellCommand(taskPromptFile, taskStatusFile)}\r`
+          );
+        } else {
+          this.deps.writeTerminal(sessionId, `${prompt}\r`);
         }
 
-        this.deps.writeTerminal(sessionId, `${taskDef.prompt}\r`);
-
-        await this.waitForIdle(sessionId, idleMs);
+        const marker = await this.waitForTaskMarker(loopId, taskStatusFile);
 
         this.outputEmitter.removeListener(`output:${sessionId}`, collectOutput);
 
         const rawOutput = taskChunks.join("");
         const cleanOutput = rawOutput.replace(ANSI_ESCAPE, "");
-        const taskFile = join(loopPath, "tasks", `${i}_${sanitizeFilename(taskDef.title)}.txt`);
-        writeFileSync(taskFile, cleanOutput, "utf8");
+        writeFileSync(taskOutputFile, cleanOutput, "utf8");
+
+        if (marker === null) {
+          break;
+        }
+
+        if (marker.status === "failed") {
+          this.deps.db.updateTaskLoopTask(taskRecord.id, {
+            status: "failed",
+            completedAt: new Date().toISOString()
+          });
+          this.deps.db.updateTaskLoop(loopId, {
+            status: "failed",
+            completedAt: new Date().toISOString()
+          });
+          this.emitProgress(loopId, projectIdFromLoop(this.deps.db, loopId), "failed", i, "failed");
+          return;
+        }
 
         if (taskDef.memoryNote) {
           appendFileSync(
@@ -166,11 +248,6 @@ export class TaskLoopService {
             `## Task ${i + 1}: ${taskDef.title}\n${taskDef.memoryNote}\n\n`,
             "utf8"
           );
-        }
-
-        if (definition.postPrompt) {
-          this.deps.writeTerminal(sessionId, `${definition.postPrompt}\r`);
-          await this.waitForIdle(sessionId, idleMs);
         }
 
         const completedStatus: TaskLoopTaskStatus = "completed";
@@ -198,27 +275,25 @@ export class TaskLoopService {
     });
 
     const projectId = projectIdFromLoop(this.deps.db, loopId);
-    this.emitProgress(loopId, projectId, finalStatus, definition.tasks.length - 1, "completed");
+    const finalTaskStatus: TaskLoopTaskStatus = finalStatus === "stopped" ? "pending" : "completed";
+    this.emitProgress(loopId, projectId, finalStatus, definition.tasks.length - 1, finalTaskStatus);
     this.stoppedLoops.delete(loopId);
   }
 
-  private waitForIdle(sessionId: string, timeoutMs: number): Promise<void> {
-    return new Promise((resolve) => {
-      let timer: ReturnType<typeof setTimeout>;
+  private async waitForTaskMarker(
+    loopId: string,
+    taskStatusFile: string
+  ): Promise<TaskCompletionMarker | null> {
+    while (!this.stoppedLoops.has(loopId)) {
+      const marker = readTaskMarker(taskStatusFile);
+      if (marker?.status === "completed" || marker?.status === "failed") {
+        return marker;
+      }
 
-      const onOutput = () => {
-        clearTimeout(timer);
-        timer = setTimeout(done, timeoutMs);
-      };
+      await sleep(TASK_MARKER_POLL_MS);
+    }
 
-      const done = () => {
-        this.outputEmitter.removeListener(`output:${sessionId}`, onOutput);
-        resolve();
-      };
-
-      this.outputEmitter.on(`output:${sessionId}`, onOutput);
-      timer = setTimeout(done, timeoutMs);
-    });
+    return null;
   }
 
   pause(loopId: string): void {
@@ -230,13 +305,68 @@ export class TaskLoopService {
     this.emitProgress(loopId, loop.projectId, "paused", loop.currentTaskIndex, "running");
   }
 
-  resume(loopId: string): void {
+  async resume(loopId: string, nextAgent?: TaskLoopAgent): Promise<void> {
     const loop = this.deps.db.getTaskLoopById(loopId);
-    if (!loop || loop.status !== "paused") return;
+    if (!loop) return;
 
+    if (loop.status === "paused") {
+      this.pausedLoops.delete(loopId);
+      this.deps.db.updateTaskLoop(loopId, { status: "running", completedAt: null });
+      this.emitProgress(loopId, loop.projectId, "running", loop.currentTaskIndex, "running");
+      return;
+    }
+
+    if (loop.status !== "failed" && loop.status !== "stopped") return;
+
+    const projectPath = this.deps.getProjectPath(loop.projectId);
+    const loopPath = join(projectPath, FORGEDESK_DIR, "loops", loopId);
+    const definition = readTaskLoopDefinition(join(loopPath, "definition.json"));
+    const currentTaskDef = definition.tasks[loop.currentTaskIndex];
+    const currentTaskRecord = this.deps.db.getTaskLoopTaskByIndex(loopId, loop.currentTaskIndex);
+    const agent = nextAgent ?? loop.agent;
+
+    if (!currentTaskDef || !currentTaskRecord) {
+      throw new Error(`Loop ${loopId} has no task at index ${loop.currentTaskIndex} to resume.`);
+    }
+
+    const taskStatusFile = join(
+      loopPath,
+      "tasks",
+      `${loop.currentTaskIndex}_${sanitizeFilename(currentTaskDef.title)}.json`
+    );
+
+    writeTaskMarker(taskStatusFile, {
+      taskId: currentTaskDef.id,
+      taskTitle: currentTaskDef.title,
+      status: "pending",
+      updatedAt: new Date().toISOString()
+    });
+
+    this.deps.db.updateTaskLoopTask(currentTaskRecord.id, {
+      status: "pending",
+      startedAt: null,
+      completedAt: null
+    });
+
+    this.stoppedLoops.delete(loopId);
     this.pausedLoops.delete(loopId);
-    this.deps.db.updateTaskLoop(loopId, { status: "running" });
-    this.emitProgress(loopId, loop.projectId, "running", loop.currentTaskIndex, "running");
+    this.deps.db.updateTaskLoop(loopId, {
+      agent,
+      status: "running",
+      completedAt: null
+    });
+    this.emitProgress(loopId, loop.projectId, "running", loop.currentTaskIndex, "pending");
+
+    await this.spawnLoopSession(
+      loopId,
+      loop.projectId,
+      loop.name,
+      agent,
+      definition,
+      loopPath,
+      projectPath,
+      loop.currentTaskIndex
+    );
   }
 
   async stop(loopId: string): Promise<void> {
@@ -248,6 +378,15 @@ export class TaskLoopService {
 
     if (loop.sessionId) {
       await this.deps.terminateTerminal(loop.sessionId);
+    }
+
+    const currentTask = this.deps.db.getTaskLoopTaskByIndex(loopId, loop.currentTaskIndex);
+    if (currentTask?.status === "running") {
+      this.deps.db.updateTaskLoopTask(currentTask.id, {
+        status: "pending",
+        startedAt: null,
+        completedAt: null
+      });
     }
 
     this.deps.db.updateTaskLoop(loopId, {
@@ -322,6 +461,104 @@ function sanitizeFilename(name: string): string {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 50);
+}
+
+function buildTaskPrompt(input: {
+  prePrompt?: string;
+  postPrompt?: string | null;
+  taskPrompt: string;
+  taskStatusRelativePath: string;
+}): string {
+  const instructions = [
+    input.taskPrompt,
+    "",
+    `Quando concluir esta task, atualize o arquivo ${input.taskStatusRelativePath} com JSON valido e defina "status": "completed".`,
+    `Se nao conseguir concluir, atualize o mesmo arquivo com "status": "failed" e preencha "failureReason".`,
+    'Voce pode preencher opcionalmente "summary" com um resumo curto do que foi feito.',
+    "Nao avance para outra task por conta propria; o loop so libera a proxima depois desse arquivo ser marcado."
+  ];
+
+  if (input.postPrompt) {
+    instructions.push("", `Antes de marcar o arquivo, execute tambem esta instrucao complementar: ${input.postPrompt}`);
+  }
+
+  return input.prePrompt
+    ? `${input.prePrompt}\n${instructions.join("\n")}`
+    : instructions.join("\n");
+}
+
+function buildCodexExecShellCommand(prompt: string, taskStatusFile: string): string {
+  const agentCommand = [
+    "codex",
+    "exec",
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--skip-git-repo-check",
+    shellSingleQuote(prompt)
+  ].join(" ");
+
+  return buildGuardedAgentShellCommand(agentCommand, taskStatusFile);
+}
+
+function buildClaudeShellCommand(promptFile: string, taskStatusFile: string): string {
+  const agentCommand = `cat ${shellSingleQuote(promptFile)} | claude --dangerously-skip-permissions`;
+  return buildGuardedAgentShellCommand(agentCommand, taskStatusFile);
+}
+
+function buildGuardedAgentShellCommand(agentCommand: string, taskStatusFile: string): string {
+  const guardCommand = [
+    "node",
+    "-e",
+    shellSingleQuote(
+      [
+        "const fs = require('node:fs');",
+        "const statusFile = process.argv[1];",
+        "const exitCode = Number(process.argv[2] ?? '0');",
+        "let marker = {};",
+        "try { marker = JSON.parse(fs.readFileSync(statusFile, 'utf8')); } catch {}",
+        "if (marker.status === 'completed' || marker.status === 'failed') process.exit(0);",
+        "marker = {",
+        "  ...marker,",
+        "  status: 'failed',",
+        "  updatedAt: new Date().toISOString(),",
+        "  failureReason: exitCode === 0",
+        "    ? 'Agent command exited without updating task status file.'",
+        "    : `Agent command exited with code ${exitCode} before updating task status file.`",
+        "};",
+        "fs.writeFileSync(statusFile, JSON.stringify(marker, null, 2) + '\\n', 'utf8');"
+      ].join(" ")
+    ),
+    shellSingleQuote(taskStatusFile),
+    '"$status"'
+  ].join(" ");
+
+  return `(${agentCommand}); status=$?; ${guardCommand}`;
+}
+
+function shellSingleQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+function writeTaskMarker(taskStatusFile: string, marker: TaskCompletionMarker): void {
+  writeFileSync(taskStatusFile, JSON.stringify(marker, null, 2) + "\n", "utf8");
+}
+
+function readTaskMarker(taskStatusFile: string): TaskCompletionMarker | null {
+  try {
+    return JSON.parse(readFileSync(taskStatusFile, "utf8")) as TaskCompletionMarker;
+  } catch {
+    return null;
+  }
+}
+
+function readTaskLoopDefinition(definitionFile: string): TaskLoopDefinition {
+  return JSON.parse(readFileSync(definitionFile, "utf8")) as TaskLoopDefinition;
+}
+
+function toProjectRelativePath(projectPath: string, filePath: string): string {
+  const normalizedProjectPath = projectPath.endsWith("/") ? projectPath : `${projectPath}/`;
+  return filePath.startsWith(normalizedProjectPath)
+    ? filePath.slice(normalizedProjectPath.length)
+    : filePath;
 }
 
 function sleep(ms: number): Promise<void> {

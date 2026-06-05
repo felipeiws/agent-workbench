@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
@@ -14,6 +15,7 @@ import {
   buildDefaultProjectConfig,
   detectSuspiciousCommand,
   inferMultiAgentSuspicion,
+  normalizeTerminalCommand,
   parseProjectConfig,
   type AuditEventDetectedEvent,
   type CoreServices,
@@ -31,10 +33,21 @@ import {
   type TerminalResizePayload
 } from "../../shared/src/index";
 import { TerminalManager } from "../../terminal/src/index";
+import {
+  AiTerminalManager,
+  type AiTerminalBlockStartEvent,
+  type AiTerminalBlockChunkEvent,
+  type AiTerminalBlockEndEvent,
+  type AiTerminalExitEvent,
+  type AiTerminalPromptEvent
+} from "../../ai-terminal/src/index";
 import type { FSWatcher } from "chokidar";
 import type {
   ActiveAgentView,
+  AiTerminalSessionRecord,
+  AppSettings,
   AuditEvent,
+  CommandBlock,
   DiffPreview,
   FileHistoryEntry,
   GitHubIssue,
@@ -113,6 +126,7 @@ function writeProjectConfigFile(path: string, config: LoadedProjectConfig["confi
 export class WatcherService {
   private readonly events = new EventEmitter();
   private readonly watchers = new Map<string, FSWatcher>();
+  private readonly refreshState = new Map<string, { running: boolean; pending: boolean }>();
 
   constructor(
     private readonly git: GitCliService,
@@ -134,6 +148,8 @@ export class WatcherService {
       void watcher.close();
       this.watchers.delete(projectId);
     }
+
+    this.refreshState.delete(projectId);
   }
 
   onGitStatusChanged(listener: (event: GitStatusChangedEvent) => void): void {
@@ -160,11 +176,41 @@ export class WatcherService {
   }
 
   private async handleChange(projectId: string, projectPath: string): Promise<void> {
-    const groups = await this.git.getStatus(projectPath);
-    const sessions = this.db.listTerminalSessions(projectId);
-    const activityMap = this.getActivityMap?.() ?? new Map<string, number>();
-    const suspicion = inferMultiAgentSuspicion(sessions, activityMap);
-    this.events.emit("gitStatusChanged", { projectId, groups, suspicion });
+    const state = this.refreshState.get(projectId) ?? { running: false, pending: false };
+
+    if (state.running) {
+      state.pending = true;
+      this.refreshState.set(projectId, state);
+      return;
+    }
+
+    state.running = true;
+    state.pending = false;
+    this.refreshState.set(projectId, state);
+
+    try {
+      const groups = await this.git.getStatus(projectPath);
+      const sessions = this.db.listTerminalSessions(projectId);
+      const activityMap = this.getActivityMap?.() ?? new Map<string, number>();
+      const suspicion = inferMultiAgentSuspicion(sessions, activityMap);
+      this.events.emit("gitStatusChanged", { projectId, groups, suspicion });
+    } finally {
+      const nextState = this.refreshState.get(projectId);
+
+      if (!nextState) {
+        return;
+      }
+
+      nextState.running = false;
+
+      if (nextState.pending) {
+        nextState.pending = false;
+        void this.handleChange(projectId, projectPath);
+        return;
+      }
+
+      this.refreshState.set(projectId, nextState);
+    }
   }
 }
 
@@ -339,14 +385,6 @@ export class ProjectService {
         const config = await this.getProjectConfig(project.id);
         const syncedProject = await this.getProjectById(project.id);
         const groups = await this.git.getStatus(syncedProject.path);
-        const primaryItem = groups[0]?.items[0];
-        const primaryFile = primaryItem?.path ?? "";
-        const primaryStaged = primaryItem?.status === "staged";
-        const [diff, history] = await Promise.all([
-          this.git.getDiff(syncedProject.path, primaryFile, "side-by-side", primaryStaged),
-          this.git.getHistory(syncedProject.path, primaryFile)
-        ]);
-
         const projectSessions = sessions.filter((session) => session.projectId === syncedProject.id);
 
         return {
@@ -355,8 +393,6 @@ export class ProjectService {
           config,
           git: {
             groups,
-            diff,
-            history,
             suspicion: inferMultiAgentSuspicion(projectSessions)
           },
           sessions: projectSessions
@@ -376,6 +412,13 @@ export class ProjectService {
     const project = await this.getProjectById(payload.projectId);
     const targetPath = payload.filePath ? join(project.path, payload.filePath) : project.path;
     await openInIde(project.ideCommand, targetPath, payload.line);
+  }
+
+  async openFileInEditor(projectId: ProjectId, filePath: string, editorCommand: string, line?: number): Promise<void> {
+    const project = await this.getProjectById(projectId);
+    const command = editorCommand.trim() || project.ideCommand;
+    const targetPath = join(project.path, filePath);
+    await openInIde(command, targetPath, line);
   }
 
   async saveGitHubConfig(projectId: ProjectId, github: ProjectGitHubConfig | null): Promise<LoadedProjectConfig> {
@@ -457,21 +500,22 @@ export class TerminalService {
 
   async createSession(payload: TerminalCreatePayload): Promise<TerminalSessionRecord> {
     const project = await this.projectService.getProjectById(payload.projectId);
+    const command = normalizeTerminalCommand(payload.command);
     const session = this.db.createTerminalSession({
       projectId: payload.projectId,
       name: payload.name,
-      command: payload.command,
+      command,
       cwd: project.path,
       state: "running"
     });
 
-    this.db.appendTerminalChunk(session.id, "system", `$ ${payload.command}\r\n`);
+    this.db.appendTerminalChunk(session.id, "system", `$ ${command}\r\n`);
 
     this.terminalManager.spawn({
       id: session.id,
       name: payload.name,
       cwd: project.path,
-      command: payload.command
+      command
     });
 
     const layout = this.db.getProjectLayout(payload.projectId);
@@ -623,6 +667,10 @@ export class GitServiceFacade {
 
   async getStagedDiff(projectId: string): Promise<string> {
     return this.git.getStagedDiff(await this.projectPath(projectId));
+  }
+
+  async push(projectId: string, token?: string): Promise<void> {
+    return this.git.push(await this.projectPath(projectId), token);
   }
 }
 
@@ -787,9 +835,130 @@ export class GitHubDispatcher {
   }
 }
 
+export class AiTerminalService {
+  private readonly events = new EventEmitter();
+  private readonly manager: AiTerminalManager;
+
+  constructor(private readonly getProjectPath: (projectId: string) => string) {
+    this.manager = new AiTerminalManager();
+
+    this.manager.on("blockStart", (e: AiTerminalBlockStartEvent) => {
+      const record = this.manager.getRecord(e.sessionId);
+      if (record) record.state = "running";
+      this.events.emit("blockStart", e);
+    });
+
+    this.manager.on("blockChunk", (e: AiTerminalBlockChunkEvent) => {
+      this.events.emit("blockChunk", e);
+    });
+
+    this.manager.on("blockEnd", (e: AiTerminalBlockEndEvent) => {
+      const record = this.manager.getRecord(e.sessionId);
+      if (record) {
+        record.state = "idle";
+        record.cwd = e.cwd;
+      }
+      this.events.emit("blockEnd", e);
+    });
+
+    this.manager.on("prompt", (e: AiTerminalPromptEvent) => {
+      const record = this.manager.getRecord(e.sessionId);
+      if (record) record.cwd = e.cwd;
+      this.events.emit("prompt", e);
+    });
+
+    this.manager.on("exit", (e: AiTerminalExitEvent) => {
+      this.events.emit("exit", e);
+    });
+  }
+
+  create(projectId: string, name: string, provider: "claude" | "codex"): AiTerminalSessionRecord {
+    const cwd = this.getProjectPath(projectId);
+    const record: AiTerminalSessionRecord = {
+      id: randomUUID(),
+      projectId,
+      name,
+      cwd,
+      provider,
+      state: "idle",
+      startedAt: new Date().toISOString()
+    };
+    this.manager.create(record);
+    return { ...record };
+  }
+
+  send(sessionId: string, command: string): CommandBlock | null {
+    return this.manager.sendCommand(sessionId, command);
+  }
+
+  resize(sessionId: string, cols: number, rows: number): void {
+    this.manager.resize(sessionId, cols, rows);
+  }
+
+  terminate(sessionId: string): void {
+    this.manager.terminate(sessionId);
+  }
+
+  getBlocks(sessionId: string): CommandBlock[] {
+    return this.manager.getBlocks(sessionId);
+  }
+
+  listSessions(projectId: string): AiTerminalSessionRecord[] {
+    return this.manager.listSessions(projectId);
+  }
+
+  onBlockStart(listener: (e: AiTerminalBlockStartEvent) => void): void {
+    this.events.on("blockStart", listener);
+  }
+
+  onBlockChunk(listener: (e: AiTerminalBlockChunkEvent) => void): void {
+    this.events.on("blockChunk", listener);
+  }
+
+  onBlockEnd(listener: (e: AiTerminalBlockEndEvent) => void): void {
+    this.events.on("blockEnd", listener);
+  }
+
+  onPrompt(listener: (e: AiTerminalPromptEvent) => void): void {
+    this.events.on("prompt", listener);
+  }
+
+  onExit(listener: (e: AiTerminalExitEvent) => void): void {
+    this.events.on("exit", listener);
+  }
+}
+
+const DEFAULT_COMMIT_PROMPT =
+  "Generate a concise git commit message for these staged changes. Use conventional commits format (feat:, fix:, refactor:, chore:, docs:, style:, test:, etc.). Reply with ONLY the commit message, nothing else.";
+
+export class SettingsService {
+  constructor(private readonly db: DatabaseClient) {}
+
+  getSettings(): AppSettings {
+    return {
+      aiProvider: (this.db.getAppSetting("aiProvider") as AppSettings["aiProvider"]) ?? "anthropic",
+      aiApiKey: (this.db.getAppSetting("aiApiKey") ?? "").trim(),
+      aiModel: this.db.getAppSetting("aiModel") ?? "claude-haiku-4-5-20251001",
+      commitPrompt: this.db.getAppSetting("commitPrompt") ?? DEFAULT_COMMIT_PROMPT,
+      editorCommand: this.db.getAppSetting("editorCommand") ?? "",
+      gitToken: this.db.getAppSetting("gitToken") ?? ""
+    };
+  }
+
+  saveSettings(settings: Partial<AppSettings>): AppSettings {
+    for (const [key, value] of Object.entries(settings)) {
+      if (value !== undefined) {
+        this.db.setAppSetting(key, String(value));
+      }
+    }
+    return this.getSettings();
+  }
+}
+
 export function createCoreServices(databaseFile: string): CoreServices {
   const db = new DatabaseClient(databaseFile);
   const git = new GitCliService();
+  const settingsService = new SettingsService(db);
   const projectService = new ProjectService(db, git);
   const terminalManager = new TerminalManager();
   const auditService = new AuditService(db);
@@ -821,6 +990,12 @@ export function createCoreServices(databaseFile: string): CoreServices {
     }
   });
 
+  const aiTerminalService = new AiTerminalService((projectId) => {
+    const project = db.getProjectById(projectId);
+    if (!project) throw new Error(`Project ${projectId} not found`);
+    return project.path;
+  });
+
   projectService.setWatcher(watcherService);
   projectService.ensureDefaultWorkspace();
 
@@ -835,6 +1010,10 @@ export function createCoreServices(databaseFile: string): CoreServices {
   }
 
   return {
+    settingsService: {
+      getSettings: () => settingsService.getSettings(),
+      saveSettings: (settings) => settingsService.saveSettings(settings)
+    },
     auditService,
     projectService,
     terminalService,
@@ -858,12 +1037,26 @@ export function createCoreServices(databaseFile: string): CoreServices {
       start: (projectId, agent, definition) =>
         taskLoopService.start(projectId, agent, definition),
       pause: (loopId) => taskLoopService.pause(loopId),
-      resume: (loopId) => taskLoopService.resume(loopId),
+      resume: (loopId, agent) => taskLoopService.resume(loopId, agent),
       stop: (loopId) => taskLoopService.stop(loopId),
       delete: (loopId) => taskLoopService.delete(loopId),
       list: (projectId) => taskLoopService.list(projectId),
       getTasks: (loopId) => taskLoopService.getTasks(loopId),
       onProgress: (listener) => taskLoopService.onProgress(listener)
+    },
+    aiTerminalService: {
+      create: (projectId, name, provider) =>
+        aiTerminalService.create(projectId, name, provider),
+      send: (sessionId, command) => aiTerminalService.send(sessionId, command),
+      resize: (sessionId, cols, rows) => aiTerminalService.resize(sessionId, cols, rows),
+      terminate: (sessionId) => aiTerminalService.terminate(sessionId),
+      getBlocks: (sessionId) => aiTerminalService.getBlocks(sessionId),
+      listSessions: (projectId) => aiTerminalService.listSessions(projectId),
+      onBlockStart: (listener) => aiTerminalService.onBlockStart(listener),
+      onBlockChunk: (listener) => aiTerminalService.onBlockChunk(listener),
+      onBlockEnd: (listener) => aiTerminalService.onBlockEnd(listener),
+      onPrompt: (listener) => aiTerminalService.onPrompt(listener),
+      onExit: (listener) => aiTerminalService.onExit(listener)
     }
   };
 }

@@ -187,8 +187,6 @@ export interface ProjectSnapshot {
   config: LoadedProjectConfig;
   git: {
     groups: GitStatusGroup[];
-    diff: DiffPreview;
-    history: FileHistoryEntry[];
     suspicion: AgentSuspicion | null;
   };
   sessions: TerminalSessionRecord[];
@@ -213,6 +211,28 @@ export type ProjectImportResult =
       status: "error";
       message: string;
     };
+
+export interface CommandBlock {
+  id: string;
+  sessionId: string;
+  command: string;
+  cwd: string;
+  output: string;
+  exitCode: number | null;
+  startedAt: string;
+  completedAt: string | null;
+  isRunning: boolean;
+}
+
+export interface AiTerminalSessionRecord {
+  id: string;
+  projectId: string;
+  name: string;
+  cwd: string;
+  provider: "claude" | "codex";
+  state: "idle" | "running";
+  startedAt: string;
+}
 
 export type TaskLoopAgent = "claude" | "codex";
 export type TaskLoopStatus = "idle" | "running" | "paused" | "completed" | "failed" | "stopped";
@@ -255,4 +275,13 @@ export interface TaskLoopTaskRecord {
   status: TaskLoopTaskStatus;
   startedAt: string | null;
   completedAt: string | null;
+}
+
+export interface AppSettings {
+  aiProvider: "anthropic" | "openai";
+  aiApiKey: string;
+  aiModel: string;
+  commitPrompt: string;
+  editorCommand: string;
+  gitToken: string;
 }

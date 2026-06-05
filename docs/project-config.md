@@ -22,7 +22,7 @@ Definir identidade do projeto, modo de segurança, comando da IDE e templates de
     {
       "name": "Codex",
       "type": "agent",
-      "command": "codex"
+      "command": "codex --dangerously-bypass-approvals-and-sandbox --no-alt-screen"
     },
     {
       "name": "Claude",
@@ -60,3 +60,4 @@ Se o arquivo não existir, o sistema gera uma configuração default auditável 
 - `project`, `safeMode` e `ide.command` são sincronizados com a tabela `projects` no SQLite local.
 - O comando da IDE usado pelo main process sempre vem da configuração validada do projeto.
 - Os templates em `terminals` abastecem a UI para criação de sessões pré-configuradas.
+- Quando o comando começa com `codex`, o main normaliza a sessão para garantir um modo compatível com o runtime desktop, adicionando flags de sandbox/aprovação e preservação de scrollback quando elas não foram declaradas explicitamente.

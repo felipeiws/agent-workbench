@@ -39,6 +39,7 @@ export function DiffPanel({
   onOpenProjectInIde,
   onSelectCommit
 }: DiffPanelProps) {
+  const hasSelectedFile = filePath.length > 0;
   const stats = useMemo(() => {
     if (!diff) return { add: 0, del: 0 };
     return {
@@ -54,12 +55,18 @@ export function DiffPanel({
       <div className="fd-diff-head">
         <div className="fd-diff-title">
           <ForgeIcon name="diff" size={12} />
-          <span className="dir">{directory}</span>
-          <span className="file">{fileName}</span>
+          {hasSelectedFile ? (
+            <>
+              <span className="dir">{directory}</span>
+              <span className="file">{fileName}</span>
+            </>
+          ) : (
+            <span className="file">Diff</span>
+          )}
           {diff?.isNewFile && (
             <span className="fd-new-file-badge">NEW</span>
           )}
-          {!diff?.isBinary && (
+          {hasSelectedFile && !diff?.isBinary && (
             <span className="fd-diff-stats">
               <span className="add">+{stats.add}</span>
               <span className="del">−{stats.del}</span>
@@ -68,7 +75,7 @@ export function DiffPanel({
         </div>
 
         <div className="fd-diff-modes">
-          {selectedCommitHash && onSelectCommit && (
+          {hasSelectedFile && selectedCommitHash && onSelectCommit && (
             <button
               className="fd-commit-back-btn"
               onClick={() => onSelectCommit(null)}
@@ -79,6 +86,7 @@ export function DiffPanel({
           )}
           <button
             className={diffMode === "side" ? "active" : ""}
+            disabled={!hasSelectedFile}
             onClick={() => onDiffModeChange("side")}
             type="button"
           >
@@ -86,6 +94,7 @@ export function DiffPanel({
           </button>
           <button
             className={diffMode === "inline" ? "active" : ""}
+            disabled={!hasSelectedFile}
             onClick={() => onDiffModeChange("inline")}
             type="button"
           >
@@ -100,13 +109,14 @@ export function DiffPanel({
         ) : (
           <div className="fd-empty-state">
             <ForgeIcon name="diff" size={24} />
-            <span>Select a file to inspect the diff.</span>
+            <span>Selecione um arquivo para ver o que foi modificado.</span>
           </div>
         )}
       </div>
 
       <HistoryPanel
         commits={commits}
+        hasSelectedFile={hasSelectedFile}
         ideError={ideError}
         ideName={ideName}
         selectedCommitHash={selectedCommitHash}
@@ -268,6 +278,7 @@ function toSideBySideRows(lines: DiffLine[]): SideBySideRow[] {
 
 function HistoryPanel({
   commits,
+  hasSelectedFile,
   ideError,
   ideName,
   selectedCommitHash,
@@ -276,6 +287,7 @@ function HistoryPanel({
   onSelectCommit
 }: {
   commits: FileHistoryEntry[];
+  hasSelectedFile: boolean;
   ideError?: string | null;
   ideName: string;
   selectedCommitHash?: string | null;
@@ -290,7 +302,12 @@ function HistoryPanel({
           Quick history <span className="count">{commits.length}</span>
         </div>
         <div className="fd-history-actions">
-          <button className="fd-secondary-button" onClick={onOpenFileInIde} type="button">
+          <button
+            className="fd-secondary-button"
+            disabled={!hasSelectedFile}
+            onClick={onOpenFileInIde}
+            type="button"
+          >
             <ForgeIcon name="external" size={11} />
             Open in {ideName}
           </button>

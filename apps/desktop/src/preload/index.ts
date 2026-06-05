@@ -40,7 +40,13 @@ function on<C extends keyof IpcEventMap>(
 
 const api: AgentWorkbenchWindow["agentWorkbench"] = {
   app: {
-    getSnapshot: () => invoke(ipcChannels.appSnapshot, undefined)
+    getSnapshot: () => invoke(ipcChannels.appSnapshot, undefined),
+    getUpdateStatus: () => invoke(ipcChannels.appUpdateStatus, undefined),
+    installManualUpdate: () => invoke(ipcChannels.appInstallManualUpdate, undefined),
+    relaunch: () => invoke(ipcChannels.appRelaunch, undefined),
+    getSettings: () => invoke(ipcChannels.appGetSettings, undefined),
+    saveSettings: (settings) => invoke(ipcChannels.appSaveSettings, settings),
+    testApiKey: () => invoke(ipcChannels.appTestApiKey, undefined)
   },
   audit: {
     listEvents: (projectId) => invoke(ipcChannels.auditListEvents, projectId)
@@ -63,6 +69,7 @@ const api: AgentWorkbenchWindow["agentWorkbench"] = {
     importProject: (payload) => invoke(ipcChannels.projectImport, payload),
     removeProject: (projectId) => invoke(ipcChannels.projectRemove, projectId),
     openIde: (payload) => invoke(ipcChannels.projectOpenIde, payload),
+    openFileInEditor: (payload) => invoke(ipcChannels.projectOpenFileInEditor, payload),
     listActiveAgents: () => invoke(ipcChannels.projectActiveAgents, undefined)
   },
   git: {
@@ -74,6 +81,7 @@ const api: AgentWorkbenchWindow["agentWorkbench"] = {
     getCommitDiff: (payload) => invoke(ipcChannels.gitCommitDiff, payload),
     addToGitIgnore: (payload) => invoke(ipcChannels.gitIgnoreAdd, payload),
     commit: (payload) => invoke(ipcChannels.gitCommit, payload),
+    push: (projectId) => invoke(ipcChannels.gitPush, projectId),
     generateCommitMessage: (projectId) => invoke(ipcChannels.gitGenerateCommitMessage, projectId)
   },
   github: {
@@ -92,6 +100,15 @@ const api: AgentWorkbenchWindow["agentWorkbench"] = {
     list: (payload) => invoke(ipcChannels.taskloopList, payload),
     getTasks: (loopId) => invoke(ipcChannels.taskloopGetTasks, loopId)
   },
+  aiTerminal: {
+    create: (payload) => invoke(ipcChannels.aiTerminalCreate, payload),
+    send: (payload) => invoke(ipcChannels.aiTerminalSend, payload),
+    resize: (payload) => invoke(ipcChannels.aiTerminalResize, payload),
+    terminate: (sessionId) => invoke(ipcChannels.aiTerminalTerminate, sessionId),
+    getBlocks: (sessionId) => invoke(ipcChannels.aiTerminalGetBlocks, sessionId),
+    listSessions: (projectId) => invoke(ipcChannels.aiTerminalListSessions, projectId),
+    query: (payload) => invoke(ipcChannels.aiTerminalQuery, payload)
+  },
   onTerminalOutput: (listener) => on(ipcChannels.terminalOutputEvent, listener),
   onTerminalExit: (listener) => on(ipcChannels.terminalExitEvent, listener),
   onTerminalStateChange: (listener) => on(ipcChannels.terminalStateChangeEvent, listener),
@@ -99,7 +116,13 @@ const api: AgentWorkbenchWindow["agentWorkbench"] = {
   onAuditEventDetected: (listener) => on(ipcChannels.auditEventDetectedEvent, listener),
   onGithubIssueDispatched: (listener) => on(ipcChannels.githubIssueDispatchedEvent, listener),
   onSystemStats: (listener) => on(ipcChannels.systemStatsEvent, listener),
-  onTaskLoopProgress: (listener) => on(ipcChannels.taskloopProgressEvent, listener)
+  onTaskLoopProgress: (listener) => on(ipcChannels.taskloopProgressEvent, listener),
+  onAiTerminalBlockStart: (listener) => on(ipcChannels.aiTerminalBlockStartEvent, listener),
+  onAiTerminalBlockChunk: (listener) => on(ipcChannels.aiTerminalBlockChunkEvent, listener),
+  onAiTerminalBlockEnd: (listener) => on(ipcChannels.aiTerminalBlockEndEvent, listener),
+  onAiTerminalPrompt: (listener) => on(ipcChannels.aiTerminalPromptEvent, listener),
+  onAiTerminalExit: (listener) => on(ipcChannels.aiTerminalExitEvent, listener),
+  onTokenStats: (listener) => on(ipcChannels.tokenStatsEvent, listener)
 };
 
 contextBridge.exposeInMainWorld("agentWorkbench", api);

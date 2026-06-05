@@ -26,6 +26,10 @@ export interface TerminalSessionView {
   previewLines: string[];
 }
 
+export function isSigintKeyboardEvent(event: KeyboardEvent): boolean {
+  return event.type === "keydown" && event.ctrlKey && !event.altKey && !event.metaKey && event.key === "c";
+}
+
 interface TerminalPanelProps {
   terminals: TerminalSessionView[];
   templates: TerminalTemplateView[];
@@ -137,10 +141,11 @@ export function TerminalPanel({
                 key={terminal.id}
                 onClick={() => onTerminalSelect(terminal.id)}
                 role="tab"
+                title={terminal.name}
                 type="button"
               >
                 <AgentMonogram agent={terminal.agent} monogram={terminal.monogram} />
-                <span>{terminal.name}</span>
+                <span className="fd-terminal-tab-label">{terminal.name}</span>
                 <StateDot state={terminal.state} />
               </button>
             ))}
@@ -254,8 +259,19 @@ function TerminalCanvas({
 
     xterm.loadAddon(fitAddon);
     xterm.open(hostRef.current);
+    xterm.focus();
     fitAddon.fit();
     onResizeRef.current(terminal.id, xterm.cols, xterm.rows);
+
+    xterm.attachCustomKeyEventHandler((event) => {
+      if (isSigintKeyboardEvent(event) && !xterm.hasSelection()) {
+        onInputRef.current(terminal.id, "\u0003");
+        event.preventDefault();
+        return false;
+      }
+
+      return true;
+    });
 
     const resizeObserver = new ResizeObserver(() => {
       fitAddon.fit();
@@ -263,6 +279,12 @@ function TerminalCanvas({
     });
 
     resizeObserver.observe(hostRef.current);
+
+    const focusTerminal = () => {
+      xterm.focus();
+    };
+
+    hostRef.current.addEventListener("mousedown", focusTerminal);
 
     const subscription = xterm.onData((data) => {
       if (terminalStateRef.current === "completed" || terminalStateRef.current === "error") {
@@ -278,6 +300,7 @@ function TerminalCanvas({
     return () => {
       subscription.dispose();
       resizeObserver.disconnect();
+      hostRef.current?.removeEventListener("mousedown", focusTerminal);
       xterm.dispose();
       xtermRef.current = null;
     };

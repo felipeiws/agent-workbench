@@ -31,6 +31,11 @@ export const projectConfigSchema = z.object({
 });
 
 export const PROJECT_CONFIG_FILE = ".agent-workspace.json";
+const CODEX_BASE_COMMAND = "codex";
+const CODEX_REQUIRED_FLAGS = [
+  "--dangerously-bypass-approvals-and-sandbox",
+  "--no-alt-screen"
+] as const;
 
 export function buildDefaultProjectConfig(projectName: string): ProjectConfig {
   return {
@@ -48,7 +53,7 @@ export function buildDefaultProjectConfig(projectName: string): ProjectConfig {
       {
         name: "Codex",
         type: "agent",
-        command: "codex"
+        command: buildDefaultCodexCommand()
       },
       {
         name: "Claude",
@@ -57,6 +62,42 @@ export function buildDefaultProjectConfig(projectName: string): ProjectConfig {
       }
     ]
   };
+}
+
+export function buildDefaultCodexCommand(): string {
+  return [CODEX_BASE_COMMAND, ...CODEX_REQUIRED_FLAGS].join(" ");
+}
+
+export function normalizeTerminalCommand(command: string): string {
+  const trimmed = command.trim();
+
+  if (!(trimmed === CODEX_BASE_COMMAND || trimmed.startsWith(`${CODEX_BASE_COMMAND} `))) {
+    return trimmed;
+  }
+
+  const hasSandboxPolicy =
+    trimmed.includes("--dangerously-bypass-approvals-and-sandbox") ||
+    trimmed.includes("--sandbox ") ||
+    trimmed.includes("--sandbox=") ||
+    trimmed.includes(" -s ") ||
+    trimmed.endsWith(" -s") ||
+    trimmed.includes("--ask-for-approval ") ||
+    trimmed.includes("--ask-for-approval=") ||
+    trimmed.includes(" -a ") ||
+    trimmed.endsWith(" -a");
+
+  const hasNoAltScreen = trimmed.includes("--no-alt-screen");
+  const nextParts = [trimmed];
+
+  if (!hasSandboxPolicy) {
+    nextParts.push("--dangerously-bypass-approvals-and-sandbox");
+  }
+
+  if (!hasNoAltScreen) {
+    nextParts.push("--no-alt-screen");
+  }
+
+  return nextParts.join(" ");
 }
 
 export function parseProjectConfig(

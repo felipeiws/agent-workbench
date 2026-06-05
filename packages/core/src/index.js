@@ -235,13 +235,6 @@ export class ProjectService {
             const config = await this.getProjectConfig(project.id);
             const syncedProject = await this.getProjectById(project.id);
             const groups = await this.git.getStatus(syncedProject.path);
-            const primaryItem = groups[0]?.items[0];
-            const primaryFile = primaryItem?.path ?? "";
-            const primaryStaged = primaryItem?.status === "staged";
-            const [diff, history] = await Promise.all([
-                this.git.getDiff(syncedProject.path, primaryFile, "side-by-side", primaryStaged),
-                this.git.getHistory(syncedProject.path, primaryFile)
-            ]);
             const projectSessions = sessions.filter((session) => session.projectId === syncedProject.id);
             return {
                 project: syncedProject,
@@ -249,8 +242,6 @@ export class ProjectService {
                 config,
                 git: {
                     groups,
-                    diff,
-                    history,
                     suspicion: inferMultiAgentSuspicion(projectSessions)
                 },
                 sessions: projectSessions
@@ -588,9 +579,34 @@ export class GitHubDispatcher {
         this.events.on("issueDispatched", listener);
     }
 }
+const DEFAULT_COMMIT_PROMPT =
+    "Generate a concise git commit message for these staged changes. Use conventional commits format (feat:, fix:, refactor:, chore:, docs:, style:, test:, etc.). Reply with ONLY the commit message, nothing else.";
+export class SettingsService {
+    db;
+    constructor(db) {
+        this.db = db;
+    }
+    getSettings() {
+        return {
+            aiProvider: this.db.getAppSetting("aiProvider") ?? "anthropic",
+            aiApiKey: (this.db.getAppSetting("aiApiKey") ?? "").trim(),
+            aiModel: this.db.getAppSetting("aiModel") ?? "claude-haiku-4-5-20251001",
+            commitPrompt: this.db.getAppSetting("commitPrompt") ?? DEFAULT_COMMIT_PROMPT
+        };
+    }
+    saveSettings(settings) {
+        for (const [key, value] of Object.entries(settings)) {
+            if (value !== undefined) {
+                this.db.setAppSetting(key, String(value));
+            }
+        }
+        return this.getSettings();
+    }
+}
 export function createCoreServices(databaseFile) {
     const db = new DatabaseClient(databaseFile);
     const git = new GitCliService();
+    const settingsService = new SettingsService(db);
     const projectService = new ProjectService(db, git);
     const terminalManager = new TerminalManager();
     const auditService = new AuditService(db);
@@ -609,6 +625,10 @@ export function createCoreServices(databaseFile) {
         });
     }
     return {
+        settingsService: {
+            getSettings: () => settingsService.getSettings(),
+            saveSettings: (settings) => settingsService.saveSettings(settings)
+        },
         auditService,
         projectService,
         terminalService,

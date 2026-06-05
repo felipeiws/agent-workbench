@@ -25,7 +25,8 @@
       "@agent-workbench/terminal": ["packages/terminal/src/index.ts"],
       "@agent-workbench/types": ["packages/types/src/index.ts"],
       "@agent-workbench/ui": ["packages/ui/src/index.ts"],
-      "@agent-workbench/watcher": ["packages/watcher/src/index.ts"]
+      "@agent-workbench/watcher": ["packages/watcher/src/index.ts"],
+      "@agent-workbench/ai-terminal": ["packages/ai-terminal/src/index.ts"]
     }
   }
 }

@@ -1,9 +1,12 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { dialog, ipcMain, type BrowserWindow, type IpcMainInvokeEvent } from "electron";
-import { readFileSync } from "node:fs";
+import { app, dialog, ipcMain, type BrowserWindow, type IpcMainInvokeEvent } from "electron";
+import { buildClaudeStats, buildCodexStats, readClaudeUsage, readCodexUsage } from "./usage-reader";
+import { chmod, copyFile, readFile, rename, rm } from "node:fs/promises";
 import os from "node:os";
+import { extname } from "node:path";
 
 import {
+  type AppUpdateStatus,
   ipcChannels,
   type CoreServices,
   type IpcEventMap,
@@ -32,6 +35,56 @@ export function registerIpcHandlers(
   handle(ipcChannels.appSnapshot, () =>
     services.projectService.getSnapshot()
   );
+  handle(ipcChannels.appUpdateStatus, () => getAppUpdateStatus());
+  handle(ipcChannels.appInstallManualUpdate, async () => {
+    const status = getAppUpdateStatus();
+
+    if (!status.canInstallUpdate) {
+      throw new Error(status.reason ?? "Manual update is not available in this runtime.");
+    }
+
+    const result = await dialog.showOpenDialog(window, {
+      title: "Select replacement AppImage",
+      filters: [{ name: "AppImage", extensions: ["AppImage", "appimage"] }],
+      properties: ["openFile"]
+    });
+
+    const sourcePath = result.filePaths[0];
+
+    if (result.canceled || !sourcePath) {
+      return null;
+    }
+
+    if (sourcePath === status.executablePath) {
+      throw new Error("Select a different AppImage file to replace the current installation.");
+    }
+
+    if (extname(sourcePath).toLowerCase() !== ".appimage") {
+      throw new Error("The selected file is not an AppImage.");
+    }
+
+    const tempPath = `${status.executablePath}.updating`;
+
+    try {
+      await copyFile(sourcePath, tempPath);
+      await chmod(tempPath, 0o755);
+      await rename(tempPath, status.executablePath);
+    } catch (error) {
+      await rm(tempPath, { force: true });
+      throw error;
+    }
+
+    return {
+      version: status.version,
+      executablePath: status.executablePath,
+      sourcePath,
+      replacedAt: new Date().toISOString()
+    };
+  });
+  handle(ipcChannels.appRelaunch, () => {
+    app.relaunch();
+    app.quit();
+  });
   handle(ipcChannels.auditListEvents, (_event, projectId) =>
     services.auditService.listEvents(projectId)
   );
@@ -102,6 +155,11 @@ export function registerIpcHandlers(
   handle(ipcChannels.projectOpenIde, (_event, payload) =>
     services.projectService.openIde(payload)
   );
+  handle(ipcChannels.projectOpenFileInEditor, async (_event, payload) => {
+    const settings = services.settingsService.getSettings();
+    const editorCommand = settings.editorCommand ?? "";
+    await services.projectService.openFileInEditor(payload.projectId, payload.filePath, editorCommand, payload.line);
+  });
   handle(ipcChannels.projectActiveAgents, () =>
     services.projectService.listActiveAgents()
   );
@@ -132,6 +190,55 @@ export function registerIpcHandlers(
   handle(ipcChannels.gitCommit, (_event, payload) =>
     services.gitService.commit(payload)
   );
+  handle(ipcChannels.gitPush, async (_event, projectId) => {
+    const settings = services.settingsService.getSettings();
+    return services.gitService.push(projectId, settings.gitToken || undefined);
+  });
+  handle(ipcChannels.appGetSettings, () =>
+    services.settingsService.getSettings()
+  );
+  handle(ipcChannels.appSaveSettings, (_event, settings) =>
+    services.settingsService.saveSettings(settings)
+  );
+  handle(ipcChannels.appTestApiKey, async () => {
+    const settings = services.settingsService.getSettings();
+    const key = settings.aiApiKey.trim();
+    const keyPreview = key.length > 12
+      ? `${key.slice(0, 10)}...${key.slice(-4)}`
+      : key.length > 0 ? `${key.slice(0, 4)}...` : "(vazio)";
+    const keyLength = key.length;
+
+    if (!key) {
+      return { ok: false, keyPreview, keyLength, error: "API key não configurada." };
+    }
+
+    try {
+      if (settings.aiProvider === "openai") {
+        const res = await fetch("https://api.openai.com/v1/models", {
+          headers: { Authorization: `Bearer ${key}` }
+        });
+        if (!res.ok) {
+          const body = await res.text();
+          throw new Error(`OpenAI ${res.status}: ${body}`);
+        }
+      } else {
+        const client = new Anthropic({ apiKey: key });
+        await client.messages.create({
+          model: "claude-haiku-4-5-20251001",
+          max_tokens: 1,
+          messages: [{ role: "user", content: "hi" }]
+        });
+      }
+      return { ok: true, keyPreview, keyLength };
+    } catch (error) {
+      return {
+        ok: false,
+        keyPreview,
+        keyLength,
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  });
   handle(ipcChannels.gitGenerateCommitMessage, async (_event, projectId) => {
     const diff = await services.gitService.getStagedDiff(projectId);
 
@@ -139,20 +246,47 @@ export function registerIpcHandlers(
       throw new Error("Não há mudanças staged para gerar uma mensagem de commit.");
     }
 
-    const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    const settings = services.settingsService.getSettings();
+    const apiKey = settings.aiApiKey.trim();
 
+    if (!apiKey) {
+      throw new Error("API key não configurada. Acesse Configurações > IA para configurar.");
+    }
+
+    const model = settings.aiModel;
+    const prompt = settings.commitPrompt ||
+      "Generate a concise git commit message for these staged changes. Use conventional commits format (feat:, fix:, refactor:, chore:, docs:, style:, test:, etc.). Reply with ONLY the commit message, nothing else.";
+    const userContent = `${prompt}\n\n${diff.slice(0, 8000)}`;
+
+    if (settings.aiProvider === "openai") {
+      const res = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify({
+          model: model || "gpt-4o-mini",
+          max_tokens: 256,
+          messages: [{ role: "user", content: userContent }]
+        })
+      });
+      if (!res.ok) {
+        const body = await res.text();
+        throw new Error(`OpenAI API error ${res.status}: ${body}`);
+      }
+      const data = await res.json() as { choices: Array<{ message: { content: string } }> };
+      return (data.choices[0]?.message.content ?? "").trim();
+    }
+
+    // Anthropic (default)
+    const client = new Anthropic({ apiKey });
     const response = await client.messages.create({
-      model: "claude-haiku-4-5-20251001",
+      model: model || "claude-haiku-4-5-20251001",
       max_tokens: 256,
-      messages: [{
-        role: "user",
-        content: `Generate a concise git commit message for these staged changes. Use conventional commits format (feat:, fix:, refactor:, chore:, docs:, style:, test:, etc.). Reply with ONLY the commit message, nothing else.\n\n${diff.slice(0, 8000)}`
-      }]
+      messages: [{ role: "user", content: userContent }]
     });
 
     const textBlock = response.content.find((b) => b.type === "text");
     if (!textBlock || textBlock.type !== "text") {
-      throw new Error("Failed to generate commit message.");
+      throw new Error("Falha ao gerar mensagem de commit.");
     }
 
     return textBlock.text.trim();
@@ -185,7 +319,7 @@ export function registerIpcHandlers(
 
     if (result.canceled || !result.filePaths[0]) return null;
 
-    const raw = JSON.parse(readFileSync(result.filePaths[0], "utf8")) as unknown;
+    const raw = JSON.parse(await readFile(result.filePaths[0], "utf8")) as unknown;
     return raw as import("@agent-workbench/types").TaskLoopDefinition;
   });
   handle(ipcChannels.taskloopStart, (_event, payload) =>
@@ -194,9 +328,9 @@ export function registerIpcHandlers(
   handle(ipcChannels.taskloopPause, (_event, payload) => {
     services.taskLoopService.pause(payload.loopId);
   });
-  handle(ipcChannels.taskloopResume, (_event, payload) => {
-    services.taskLoopService.resume(payload.loopId);
-  });
+  handle(ipcChannels.taskloopResume, (_event, payload) =>
+    services.taskLoopService.resume(payload.loopId, payload.agent)
+  );
   handle(ipcChannels.taskloopStop, (_event, payload) =>
     services.taskLoopService.stop(payload.loopId)
   );
@@ -210,8 +344,108 @@ export function registerIpcHandlers(
     Promise.resolve(services.taskLoopService.getTasks(loopId))
   );
 
+  handle(ipcChannels.aiTerminalCreate, (_event, payload) =>
+    Promise.resolve(services.aiTerminalService.create(payload.projectId, payload.name, payload.provider))
+  );
+  handle(ipcChannels.aiTerminalSend, (_event, payload) =>
+    Promise.resolve(services.aiTerminalService.send(payload.sessionId, payload.command))
+  );
+  handle(ipcChannels.aiTerminalResize, (_event, payload) => {
+    services.aiTerminalService.resize(payload.sessionId, payload.cols, payload.rows);
+  });
+  handle(ipcChannels.aiTerminalTerminate, (_event, sessionId) => {
+    services.aiTerminalService.terminate(sessionId);
+  });
+  handle(ipcChannels.aiTerminalGetBlocks, (_event, sessionId) =>
+    Promise.resolve(services.aiTerminalService.getBlocks(sessionId))
+  );
+  handle(ipcChannels.aiTerminalListSessions, (_event, projectId) =>
+    Promise.resolve(services.aiTerminalService.listSessions(projectId))
+  );
+  handle(ipcChannels.aiTerminalQuery, async (_event, payload) => {
+    const blocks = services.aiTerminalService.getBlocks(payload.sessionId);
+    const recentContext = blocks
+      .slice(-5)
+      .map((b) => `$ ${b.command}\n${b.output.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").slice(0, 800)}`)
+      .join("\n---\n");
+
+    const systemPrompt =
+      "You are a terminal assistant. The user wants to run a shell command. " +
+      "Respond with a JSON object: {\"command\": \"<shell command>\", \"explanation\": \"<one line explanation>\"}. " +
+      "Output ONLY valid JSON, nothing else.";
+    const userMsg = `Recent terminal context:\n${recentContext || "(empty)"}\n\nUser request: ${payload.prompt}`;
+
+    if (payload.provider === "claude") {
+      const apiKey = process.env.ANTHROPIC_API_KEY;
+      if (!apiKey) throw new Error("ANTHROPIC_API_KEY not set.");
+      const client = new Anthropic({ apiKey });
+      const res = await client.messages.create({
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 256,
+        system: systemPrompt,
+        messages: [{ role: "user", content: userMsg }]
+      });
+      void emitTokenStats(window);
+      const textBlock = res.content.find((b) => b.type === "text");
+      if (!textBlock || textBlock.type !== "text") throw new Error("No text response from Claude.");
+      const parsed = JSON.parse(textBlock.text.trim()) as { command: string; explanation: string };
+      return parsed;
+    }
+
+    // Codex via OpenAI API
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) throw new Error("OPENAI_API_KEY not set.");
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        max_tokens: 256,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userMsg }
+        ]
+      })
+    });
+    if (!res.ok) throw new Error(`OpenAI API error: ${res.status}`);
+    const data = await res.json() as {
+      choices: Array<{ message: { content: string } }>;
+      usage?: { prompt_tokens: number; completion_tokens: number };
+    };
+    void emitTokenStats(window);
+    const text = data.choices[0]?.message.content ?? "";
+    const parsed = JSON.parse(text.trim()) as { command: string; explanation: string };
+    return parsed;
+  });
+
+  services.aiTerminalService.onBlockStart((e) => {
+    send(window, ipcChannels.aiTerminalBlockStartEvent, e);
+  });
+  services.aiTerminalService.onBlockChunk((e) => {
+    send(window, ipcChannels.aiTerminalBlockChunkEvent, e);
+  });
+  services.aiTerminalService.onBlockEnd((e) => {
+    send(window, ipcChannels.aiTerminalBlockEndEvent, e);
+  });
+  services.aiTerminalService.onPrompt((e) => {
+    send(window, ipcChannels.aiTerminalPromptEvent, e);
+  });
+  services.aiTerminalService.onExit((e) => {
+    send(window, ipcChannels.aiTerminalExitEvent, e);
+  });
+
+  let tokenRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+
   services.taskLoopService.onProgress((payload) => {
     send(window, ipcChannels.taskloopProgressEvent, payload);
+    // Re-read usage after each task completes — debounced so burst events coalesce
+    if (payload.taskStatus === "completed" || payload.taskStatus === "failed") {
+      if (tokenRefreshTimer !== null) clearTimeout(tokenRefreshTimer);
+      tokenRefreshTimer = setTimeout(() => {
+        tokenRefreshTimer = null;
+        if (!window.isDestroyed()) void emitTokenStats(window);
+      }, 3_000);
+    }
   });
 
   services.terminalService.onOutput((payload) => {
@@ -251,7 +485,67 @@ export function registerIpcHandlers(
     send(window, ipcChannels.systemStatsEvent, { cpuPercent, memUsedMb, memTotalMb });
   }, 2000);
 
-  window.on("closed", () => clearInterval(statsInterval));
+  // Re-read every 60s — fast HTTP API call now, no PTY overhead
+  const tokenInterval = setInterval(() => {
+    if (!window.isDestroyed()) {
+      void emitTokenStats(window);
+    }
+  }, 60_000);
+
+  void emitTokenStats(window);
+
+  window.on("closed", () => {
+    clearInterval(statsInterval);
+    clearInterval(tokenInterval);
+  });
+}
+
+async function emitTokenStats(window: BrowserWindow): Promise<void> {
+  const [claudeData, codexData] = await Promise.all([
+    readClaudeUsage(),
+    Promise.resolve(readCodexUsage())
+  ]);
+
+  if (window.isDestroyed()) return;
+
+  send(window, ipcChannels.tokenStatsEvent, {
+    claude: buildClaudeStats(claudeData),
+    codex: buildCodexStats(codexData)
+  });
+}
+
+function getAppUpdateStatus(): AppUpdateStatus {
+  const appImagePath = resolveCurrentAppImagePath();
+
+  if (!appImagePath) {
+    return {
+      version: app.getVersion(),
+      executablePath: process.execPath,
+      canInstallUpdate: false,
+      reason: "Manual update is available only when the packaged AppImage is running."
+    };
+  }
+
+  return {
+    version: app.getVersion(),
+    executablePath: appImagePath,
+    canInstallUpdate: true,
+    reason: null
+  };
+}
+
+function resolveCurrentAppImagePath(): string | null {
+  const candidate = process.env.APPIMAGE;
+
+  if (!candidate) {
+    return null;
+  }
+
+  if (extname(candidate).toLowerCase() !== ".appimage") {
+    return null;
+  }
+
+  return candidate;
 }
 
 function sampleCpuTimes(): { total: number; idle: number } {

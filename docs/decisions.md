@@ -118,3 +118,38 @@
 - Context: o terminal precisava restaurar output real ao reabrir o app e distinguir encerramento manual de falha operacional visível.
 - Decision: o renderer hidrata `xterm` a partir dos `terminal_chunks` persistidos, o scrollback fica no SQLite por sessão e um kill manual remove a aba ativa do painel sem apagar a sessão ou seus chunks.
 - Consequences: a UI restaura histórico de terminal após restart da aplicação, fechamento voluntário não polui a lista de agentes ativos e o histórico segue auditável no main process.
+
+## ADR-018 Task loop com marcador explícito de conclusão em disco
+
+- Status: Accepted
+- Context: o loop sequencial de tasks avançava por timeout de silêncio no terminal, o que podia marcar tasks como concluídas cedo demais em cenários de resposta lenta, erro operacional ou rate limit do agente.
+- Decision: cada task do `taskloop` passa a ter um arquivo JSON de status em `.forgedesk/loops/<loopId>/tasks/`, e o prompt enviado ao agente instrui explicitamente a atualizar esse arquivo para `completed` ou `failed`.
+- Consequences: a próxima task só começa quando a anterior estiver marcada de forma auditável em disco; timeouts de idle deixam de definir conclusão e falhas do agente não avançam a fila implicitamente.
+
+## ADR-019 Retomada explícita de task falhada no task loop
+
+- Status: Accepted
+- Context: quando uma task falha, o operador precisa conseguir reexecutar exatamente a task corrente sem recriar todo o loop e sem perder o histórico já concluído.
+- Decision: `resume` do `taskloop` passa a aceitar loops em estado `failed`, recria uma nova sessão de terminal para o loop, reseta o marcador JSON da task atual para `pending` e reinicia a execução a partir de `currentTaskIndex`.
+- Consequences: tasks concluídas anteriormente permanecem auditáveis e não são repetidas; a UI pode oferecer "Retomar tarefa" após falha e o loop continua do ponto exato da interrupção.
+
+## ADR-020 Update manual assistido pela UI
+
+- Status: Accepted
+- Context: a distribuição Linux atual é feita por AppImage, sem feed remoto de releases ou infraestrutura de auto-update, mas o operador ainda precisa substituir a instalação local com menos atrito e sem acessar filesystem manualmente.
+- Decision: o processo principal expõe um fluxo IPC tipado para update manual assistido, disponível apenas quando a aplicação empacotada está rodando via AppImage; a UI abre um painel operacional que mostra o runtime atual, permite selecionar um novo AppImage via diálogo nativo, faz substituição atômica do binário em uso e oferece relaunch explícito após a troca.
+- Consequences: o renderer continua sem acesso direto a filesystem, a atualização permanece auditável e local-first, e o produto ganha um caminho intermediário útil antes de adotar auto-update remoto.
+
+## ADR-021 Diff e histórico sob demanda por arquivo selecionado
+
+- Status: Accepted
+- Context: o painel de mudanças estava carregando diff e histórico automaticamente sempre que havia alterações de arquivo, gerando consultas Git recorrentes e ocupando a área de inspeção sem uma seleção explícita do operador.
+- Decision: o snapshot de projeto passa a carregar apenas os grupos de status Git; diff e histórico são buscados no renderer somente quando um arquivo modificado é clicado, e o painel vazio exibe uma instrução explícita para seleção.
+- Consequences: o watcher deixa de provocar recargas contínuas de diff, o snapshot inicial fica mais leve e a UI passa a refletir melhor a intenção do operador ao inspecionar mudanças.
+
+## ADR-022 Troca de agente ao retomar task loop interrompido
+
+- Status: Accepted
+- Context: loops podem parar no meio de uma task por falha operacional ou esgotamento de créditos do agente atual, e o operador precisa continuar a task corrente com outro agente sem recriar o loop inteiro.
+- Decision: `resume` do `taskloop` passa a aceitar um `agent` opcional e também loops em estado `stopped`; ao retomar, o loop persiste o novo agente, reseta a task corrente para `pending` e cria uma nova sessão de terminal a partir de `currentTaskIndex`.
+- Consequences: a UI pode oferecer troca explícita entre `claude` e `codex` na retomada, o histórico concluído permanece auditável e tasks interrompidas não ficam presas ao agente que falhou ou ficou sem créditos.

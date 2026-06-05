@@ -11,5 +11,6 @@ export declare class GitCliService {
     getCommitDiff(projectPath: string, commitHash: string, filePath: string, mode: DiffPreview["mode"]): Promise<DiffPreview>;
     getStagedDiff(projectPath: string): Promise<string>;
     commit(projectPath: string, message: string): Promise<GitStatusGroup[]>;
+    push(projectPath: string, token?: string): Promise<void>;
     addToGitIgnore(projectPath: string, filePath: string): void;
 }

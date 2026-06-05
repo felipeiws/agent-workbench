@@ -22,6 +22,11 @@ export const projectConfigSchema = z.object({
     github: projectGitHubConfigSchema.optional()
 });
 export const PROJECT_CONFIG_FILE = ".agent-workspace.json";
+const CODEX_BASE_COMMAND = "codex";
+const CODEX_REQUIRED_FLAGS = [
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--no-alt-screen"
+];
 export function buildDefaultProjectConfig(projectName) {
     return {
         project: projectName,
@@ -38,7 +43,7 @@ export function buildDefaultProjectConfig(projectName) {
             {
                 name: "Codex",
                 type: "agent",
-                command: "codex"
+                command: buildDefaultCodexCommand()
             },
             {
                 name: "Claude",
@@ -47,6 +52,33 @@ export function buildDefaultProjectConfig(projectName) {
             }
         ]
     };
+}
+export function buildDefaultCodexCommand() {
+    return [CODEX_BASE_COMMAND, ...CODEX_REQUIRED_FLAGS].join(" ");
+}
+export function normalizeTerminalCommand(command) {
+    const trimmed = command.trim();
+    if (!(trimmed === CODEX_BASE_COMMAND || trimmed.startsWith(`${CODEX_BASE_COMMAND} `))) {
+        return trimmed;
+    }
+    const hasSandboxPolicy = trimmed.includes("--dangerously-bypass-approvals-and-sandbox") ||
+        trimmed.includes("--sandbox ") ||
+        trimmed.includes("--sandbox=") ||
+        trimmed.includes(" -s ") ||
+        trimmed.endsWith(" -s") ||
+        trimmed.includes("--ask-for-approval ") ||
+        trimmed.includes("--ask-for-approval=") ||
+        trimmed.includes(" -a ") ||
+        trimmed.endsWith(" -a");
+    const hasNoAltScreen = trimmed.includes("--no-alt-screen");
+    const nextParts = [trimmed];
+    if (!hasSandboxPolicy) {
+        nextParts.push("--dangerously-bypass-approvals-and-sandbox");
+    }
+    if (!hasNoAltScreen) {
+        nextParts.push("--no-alt-screen");
+    }
+    return nextParts.join(" ");
 }
 export function parseProjectConfig(raw, path, source) {
     return {

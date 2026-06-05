@@ -1,7 +1,6 @@
 import { useRef, useMemo, useState } from "react";
 
 import { ForgeIcon } from "./forge-icons";
-import { AgentMonogram } from "./status-badge";
 
 export interface ChangeSource {
   agent: string;
@@ -34,11 +33,15 @@ interface ChangesPanelProps {
   onSelectChange: (changeKey: string) => void;
   onStageChange: (filePath: string) => void;
   onUnstageChange: (filePath: string) => void;
-  onGitIgnore: (filePath: string) => void;
+  onStageAll: (filePaths: string[]) => void;
+  onUnstageAll: (filePaths: string[]) => void;
+  onOpenInEditor?: (filePath: string) => void;
+  onRefresh?: () => void;
   onShowIssues?: () => void;
   onShowGitHubConfig?: () => void;
   onShowTaskLoop?: () => void;
   onCommit: (message: string) => Promise<void>;
+  onCommitAndPush: (message: string) => Promise<void>;
   onGenerateCommitMessage: () => Promise<string>;
 }
 
@@ -50,16 +53,18 @@ export function ChangesPanel({
   onSelectChange,
   onStageChange,
   onUnstageChange,
-  onGitIgnore,
+  onStageAll,
+  onUnstageAll,
+  onOpenInEditor,
+  onRefresh,
   onShowIssues,
   onShowGitHubConfig,
   onShowTaskLoop,
   onCommit,
+  onCommitAndPush,
   onGenerateCommitMessage
 }: ChangesPanelProps) {
   const [filter, setFilter] = useState("");
-  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
-  const [showCommitForm, setShowCommitForm] = useState(false);
   const [commitMessage, setCommitMessage] = useState("");
   const [isGenerating, setIsGenerating] = useState(false);
   const [isCommitting, setIsCommitting] = useState(false);
@@ -105,17 +110,28 @@ export function ChangesPanel({
   }
 
   async function handleCommit() {
-    if (!commitMessage.trim()) {
-      return;
-    }
+    if (!commitMessage.trim()) return;
     setIsCommitting(true);
     setCommitError(null);
     try {
       await onCommit(commitMessage.trim());
       setCommitMessage("");
-      setShowCommitForm(false);
     } catch (error) {
       setCommitError(error instanceof Error ? error.message : "Commit failed.");
+    } finally {
+      setIsCommitting(false);
+    }
+  }
+
+  async function handleCommitAndPush() {
+    if (!commitMessage.trim()) return;
+    setIsCommitting(true);
+    setCommitError(null);
+    try {
+      await onCommitAndPush(commitMessage.trim());
+      setCommitMessage("");
+    } catch (error) {
+      setCommitError(error instanceof Error ? error.message : "Commit & push failed.");
     } finally {
       setIsCommitting(false);
     }
@@ -138,6 +154,16 @@ export function ChangesPanel({
           ) : null}
         </div>
         <div className="fd-panel-actions">
+          {onRefresh ? (
+            <button
+              className="fd-icon-button"
+              onClick={onRefresh}
+              title="Atualizar arquivos"
+              type="button"
+            >
+              <ForgeIcon name="restart" size={12} />
+            </button>
+          ) : null}
           <button
             className="fd-icon-button"
             onClick={onShowTaskLoop}
@@ -171,54 +197,27 @@ export function ChangesPanel({
       </div>
 
       <div className="fd-scroll fd-changes-list">
-        {groups.map((group) => {
-          const filteredItems = group.items.filter((item) =>
+        <SelectAllRow
+          items={groups.flatMap((group) => group.items).filter((item) =>
             item.key.toLowerCase().includes(filter.toLowerCase())
-          );
-
-          if (filteredItems.length === 0) {
-            return null;
-          }
-
-          return (
-            <div key={group.group}>
-              <button
-                className={`fd-group-header ${group.group === "Conflicted" ? "conflicted" : ""}`}
-                onClick={() =>
-                  setCollapsed((current) => ({
-                    ...current,
-                    [group.group]: !current[group.group]
-                  }))
-                }
-                type="button"
-              >
-                <ForgeIcon
-                  name={collapsed[group.group] ? "chevronRight" : "chevronDown"}
-                  size={10}
-                />
-                {group.group === "Conflicted" ? (
-                  <ForgeIcon name="alert" size={11} />
-                ) : null}
-                <span>{group.group}</span>
-                <span className="count">{filteredItems.length}</span>
-              </button>
-
-              {collapsed[group.group]
-                ? null
-                : filteredItems.map((item) => (
-                    <ChangeRow
-                      item={item}
-                      key={item.key}
-                      onGitIgnore={onGitIgnore}
-                      onSelectChange={onSelectChange}
-                      onStageChange={onStageChange}
-                      onUnstageChange={onUnstageChange}
-                      selected={selectedChangeKey === item.key}
-                    />
-                  ))}
-            </div>
-          );
-        })}
+          )}
+          onStageAll={onStageAll}
+          onUnstageAll={onUnstageAll}
+        />
+        {groups
+          .flatMap((group) => group.items)
+          .filter((item) => item.key.toLowerCase().includes(filter.toLowerCase()))
+          .map((item) => (
+            <ChangeRow
+              item={item}
+              key={item.key}
+              onOpenInEditor={onOpenInEditor}
+              onSelectChange={onSelectChange}
+              onStageChange={onStageChange}
+              onUnstageChange={onUnstageChange}
+              selected={selectedChangeKey === item.key}
+            />
+          ))}
       </div>
 
       {gitError ? (
@@ -228,74 +227,55 @@ export function ChangesPanel({
         </div>
       ) : null}
 
-      {showCommitForm ? (
-        <div className="fd-commit-form">
-          <textarea
-            className="fd-commit-textarea"
-            disabled={isCommitting}
-            onChange={(e) => setCommitMessage(e.target.value)}
-            placeholder="Commit message…"
-            ref={textareaRef}
-            rows={4}
-            value={commitMessage}
-          />
+      <div className="fd-commit-form">
+        <div className="fd-changes-summary">
+          <span className="add">+{metrics.totalAdd}</span>
+          <span className="del">−{metrics.totalDel}</span>
+          <span>{metrics.stagedCount}/{metrics.totalFiles} staged</span>
+        </div>
+        <textarea
+          className="fd-commit-textarea"
+          disabled={isCommitting}
+          onChange={(e) => setCommitMessage(e.target.value)}
+          placeholder="Commit message…"
+          ref={textareaRef}
+          rows={3}
+          value={commitMessage}
+        />
+        <div className="fd-commit-ai-row">
           <button
-            className="fd-generate-button"
+            className={`fd-generate-button ${isGenerating ? "spinning" : ""}`}
             disabled={!canCommit || isGenerating || isCommitting}
             onClick={handleGenerate}
+            title={isGenerating ? "Gerando…" : "Gerar mensagem com IA"}
             type="button"
           >
-            {isGenerating ? "Generating…" : "Generate with AI"}
+            <ForgeIcon name="sparkles" size={13} />
           </button>
-          {commitError ? (
-            <div className="fd-commit-error">
-              <ForgeIcon name="alert" size={11} />
-              <span>{commitError}</span>
-            </div>
-          ) : null}
-          <div className="fd-commit-actions">
-            <button
-              className="fd-secondary-button"
-              disabled={isCommitting}
-              onClick={() => { setShowCommitForm(false); setCommitError(null); }}
-              type="button"
-            >
-              Cancel
-            </button>
-            <button
-              className="fd-primary-button"
-              disabled={!commitMessage.trim() || isCommitting}
-              onClick={handleCommit}
-              type="button"
-            >
-              {isCommitting ? "Committing…" : "Commit"}
-            </button>
-          </div>
         </div>
-      ) : null}
-
-      <div className="fd-changes-summary">
-        <span className="add">+{metrics.totalAdd}</span>
-        <span className="del">−{metrics.totalDel}</span>
-        <span>{metrics.stagedCount}/{metrics.totalFiles} staged</span>
-        {!canCommit ? (
-          <span className="fd-stage-hint">Marque arquivos na coluna esquerda para montar o commit.</span>
+        {commitError ? (
+          <div className="fd-commit-error">
+            <ForgeIcon name="alert" size={11} />
+            <span>{commitError}</span>
+          </div>
         ) : null}
-        <div className="actions">
-          <button className="fd-secondary-button" type="button">
-            Reset
-          </button>
+        <div className="fd-commit-actions">
           <button
-            className="fd-primary-button"
-            disabled={!canCommit}
-            onClick={() => {
-              setCommitError(null);
-              setShowCommitForm(true);
-            }}
-            title={canCommit ? "Commit staged files" : "Marque arquivos para incluir no commit"}
+            className="fd-secondary-button"
+            disabled={!commitMessage.trim() || isCommitting}
+            onClick={handleCommit}
             type="button"
           >
             Commit
+          </button>
+          <button
+            className="fd-primary-button"
+            disabled={!canCommit || !commitMessage.trim() || isCommitting}
+            onClick={handleCommitAndPush}
+            title="Commit e enviar para o remote"
+            type="button"
+          >
+            {isCommitting ? "Enviando…" : "Commit & Push"}
           </button>
         </div>
       </div>
@@ -303,17 +283,57 @@ export function ChangesPanel({
   );
 }
 
+function SelectAllRow({
+  items,
+  onStageAll,
+  onUnstageAll
+}: {
+  items: ChangeItemView[];
+  onStageAll: (filePaths: string[]) => void;
+  onUnstageAll: (filePaths: string[]) => void;
+}) {
+  if (items.length === 0) return null;
+
+  const stagedCount = items.filter((item) => item.staged).length;
+  const allStaged = stagedCount === items.length;
+  const someStaged = stagedCount > 0 && !allStaged;
+
+  function handleToggle() {
+    const paths = items.map((item) => item.key);
+    if (allStaged) {
+      onUnstageAll(paths);
+    } else {
+      onStageAll(paths.filter((_, i) => !items[i]!.staged));
+    }
+  }
+
+  return (
+    <div className="fd-change-row fd-select-all-row">
+      <button
+        className={`fd-stage-toggle ${allStaged ? "staged" : ""}`}
+        onClick={handleToggle}
+        title={allStaged ? "Desmarcar todos" : "Marcar todos"}
+        type="button"
+      >
+        <span className={`fd-stage-indicator ${someStaged ? "indeterminate" : ""}`} />
+      </button>
+      <span className="fd-select-all-label">Todos</span>
+      <span className="fd-select-all-count">{stagedCount}/{items.length}</span>
+    </div>
+  );
+}
+
 function ChangeRow({
   item,
   selected,
-  onGitIgnore,
+  onOpenInEditor,
   onSelectChange,
   onStageChange,
   onUnstageChange
 }: {
   item: ChangeItemView;
   selected: boolean;
-  onGitIgnore: (filePath: string) => void;
+  onOpenInEditor?: (filePath: string) => void;
   onSelectChange: (changeKey: string) => void;
   onStageChange: (filePath: string) => void;
   onUnstageChange: (filePath: string) => void;
@@ -321,91 +341,54 @@ function ChangeRow({
   const changeKey = item.key;
 
   return (
-    <>
-      <div
-        className={`fd-change-row ${selected ? "selected" : ""}`}
-        onClick={() => onSelectChange(changeKey)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") {
-            onSelectChange(changeKey);
+    <div
+      className={`fd-change-row ${selected ? "selected" : ""}`}
+      onClick={() => onSelectChange(changeKey)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          onSelectChange(changeKey);
+        }
+      }}
+      role="button"
+      tabIndex={0}
+    >
+      <button
+        className={`fd-stage-toggle ${item.staged ? "staged" : ""}`}
+        onClick={(e) => {
+          e.stopPropagation();
+          if (item.staged) {
+            onUnstageChange(changeKey);
+          } else {
+            onStageChange(changeKey);
           }
         }}
-        role="button"
-        tabIndex={0}
+        title={item.staged ? "Remover do commit" : "Adicionar ao commit"}
+        type="button"
       >
-        <button
-          className={`fd-stage-toggle ${item.staged ? "staged" : ""}`}
-          onClick={(e) => {
-            e.stopPropagation();
-            if (item.staged) {
-              onUnstageChange(changeKey);
-            } else {
-              onStageChange(changeKey);
-            }
-          }}
-          title={item.staged ? "Remover do commit" : "Adicionar ao commit"}
-          type="button"
-        >
-          <span className="fd-stage-indicator" />
-          <span className="fd-stage-label">{item.staged ? "Staged" : "Stage"}</span>
-        </button>
+        <span className="fd-stage-indicator" />
+      </button>
+      {onOpenInEditor ? (
         <button
           className="fd-ignore-toggle"
           onClick={(e) => {
             e.stopPropagation();
-            onGitIgnore(changeKey);
+            onOpenInEditor(changeKey);
           }}
-          title="Add to .gitignore"
+          title="Abrir no editor"
           type="button"
         >
-          <ForgeIcon name="ignore" size={11} />
+          <ForgeIcon name="external" size={11} />
         </button>
-        <span className={`fd-git-type ${item.gtype}`}>{item.gtype}</span>
-        <span className="fd-change-path">
-          <span className="dir">{item.path}</span>
-          <span className="file">{item.file}</span>
-        </span>
-        <span className="fd-change-stats">
-          {item.add > 0 ? <span className="add">+{item.add}</span> : null}
-          {item.del > 0 ? <span className="del">−{item.del}</span> : null}
-        </span>
-      </div>
-
-      {item.sources.length > 0 ? (
-        <div className="fd-change-source">
-          <span className={`fd-inline-badge ${item.multi ? "warn" : "info"}`}>
-            <ForgeIcon name="alert" size={9} />
-            {item.multi ? "Multi-agent" : "Source"}
-          </span>
-          {item.confidence !== undefined ? (
-            <span className={`fd-confidence ${toConfidenceClass(item.confidence)}`}>
-              {toConfidenceLabel(item.confidence)}
-            </span>
-          ) : null}
-          <span>suspected:</span>
-          {item.sources.map((source) => (
-            <span className="fd-source-pill" key={`${changeKey}-${source.agent}-${source.terminal}`}>
-              <AgentMonogram
-                agent={source.agent}
-                monogram={source.agent.charAt(0).toUpperCase()}
-              />
-              <span>{source.agent}</span>
-            </span>
-          ))}
-        </div>
       ) : null}
-    </>
+      <span className="fd-change-path" style={{ color: fileColor(item.gtype) }}>
+        {item.key}
+      </span>
+    </div>
   );
 }
 
-function toConfidenceLabel(c: number): string {
-  if (c >= 0.8) return "High";
-  if (c >= 0.5) return "Medium";
-  return "Low";
-}
-
-function toConfidenceClass(c: number): string {
-  if (c >= 0.8) return "high";
-  if (c >= 0.5) return "medium";
-  return "low";
+function fileColor(gtype: ChangeItemView["gtype"]): string {
+  if (gtype === "U") return "#6b9a4e"; // new/untracked → green
+  if (gtype === "D") return "#c0533c"; // deleted → red
+  return "#6b8fb0";                    // modified/staged/renamed/conflicted → blue
 }

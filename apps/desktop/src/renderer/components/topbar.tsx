@@ -23,6 +23,8 @@ interface TopbarProps {
   safeMode: UiSafeMode;
   onToggleSafeMode: () => void;
   onAgentClick: (sessionId: string, projectId: string) => void;
+  onToggleSettings: () => void;
+  settingsOpen: boolean;
 }
 
 const stateOrder = {
@@ -40,7 +42,9 @@ export function Topbar({
   activeAgents,
   safeMode,
   onToggleSafeMode,
-  onAgentClick
+  onAgentClick,
+  onToggleSettings,
+  settingsOpen
 }: TopbarProps) {
   const sortedAgents = [...activeAgents].sort(
     (left, right) => stateOrder[left.state] - stateOrder[right.state]
@@ -90,7 +94,13 @@ export function Topbar({
         <button className="fd-icon-button" type="button" aria-label="Layout options">
           <ForgeIcon name="layout" size={13} />
         </button>
-        <button className="fd-icon-button" type="button" aria-label="Settings">
+        <button
+          className={`fd-icon-button ${settingsOpen ? "active" : ""}`}
+          type="button"
+          aria-label="Settings"
+          aria-pressed={settingsOpen}
+          onClick={onToggleSettings}
+        >
           <ForgeIcon name="settings" size={13} />
         </button>
       </div>

@@ -11,7 +11,7 @@ export interface WatchProjectOptions {
 
 export function watchProject({
   path,
-  debounceMs = 350,
+  debounceMs = 1500,
   polling = false,
   onChange
 }: WatchProjectOptions): FSWatcher {

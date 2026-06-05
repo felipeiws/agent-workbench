@@ -1,7 +1,7 @@
 {
   "version": "1",
   "name": "Implementar autenticação JWT",
-  "prePrompt": "/clear",
+  "prePrompt": "",
   "postPrompt": null,
   "idleTimeoutMs": 15000,
   "tasks": [

@@ -45,6 +45,7 @@ export function TaskLoopPanel({ projectId, onShowChanges, onShowTerminal }: Task
   const [tasks, setTasks] = useState<TaskLoopTaskRecord[]>([]);
   const [pendingDefinition, setPendingDefinition] = useState<TaskLoopDefinition | null>(null);
   const [selectedAgent, setSelectedAgent] = useState<AgentChoice>("claude");
+  const [resumeAgent, setResumeAgent] = useState<AgentChoice>("claude");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -58,6 +59,11 @@ export function TaskLoopPanel({ projectId, onShowChanges, onShowTerminal }: Task
     if (!selectedLoopId) return;
     void getTaskLoopTasks(selectedLoopId).then(setTasks);
   }, [selectedLoopId]);
+
+  useEffect(() => {
+    if (!selectedLoop) return;
+    setResumeAgent(selectedLoop.agent);
+  }, [selectedLoop]);
 
   useEffect(() => {
     return getDesktopApi().onTaskLoopProgress((event: TaskLoopProgressEvent) => {
@@ -119,10 +125,17 @@ export function TaskLoopPanel({ projectId, onShowChanges, onShowTerminal }: Task
 
   async function handleResume() {
     if (!selectedLoopId) return;
-    await resumeTaskLoop(selectedLoopId);
-    setLoops((current) =>
-      current.map((l) => (l.id === selectedLoopId ? { ...l, status: "running" } : l))
-    );
+    const agent =
+      selectedLoop?.status === "failed" || selectedLoop?.status === "stopped"
+        ? resumeAgent
+        : undefined;
+    await resumeTaskLoop(selectedLoopId, agent);
+    const [nextLoops, nextTasks] = await Promise.all([
+      listTaskLoops(projectId),
+      getTaskLoopTasks(selectedLoopId)
+    ]);
+    setLoops(nextLoops);
+    setTasks(nextTasks);
   }
 
   async function handleStop() {
@@ -211,6 +224,7 @@ export function TaskLoopPanel({ projectId, onShowChanges, onShowTerminal }: Task
             <div className="fd-taskloop-loop-head">
               <span className="fd-taskloop-loop-name">{selectedLoop.name}</span>
               <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <span className="fd-taskloop-label">Agente: {selectedLoop.agent}</span>
                 <span
                   className="fd-taskloop-status"
                   style={{ color: statusColor(selectedLoop.status) }}
@@ -243,20 +257,46 @@ export function TaskLoopPanel({ projectId, onShowChanges, onShowTerminal }: Task
               {completedCount(tasks)} / {selectedLoop.totalTasks} tarefas
             </div>
 
-            {(selectedLoop.status === "running" || selectedLoop.status === "paused") && (
+            {(selectedLoop.status === "running" ||
+              selectedLoop.status === "paused" ||
+              selectedLoop.status === "failed" ||
+              selectedLoop.status === "stopped") && (
               <div className="fd-taskloop-controls">
+                {(selectedLoop.status === "failed" || selectedLoop.status === "stopped") && (
+                  <div className="fd-taskloop-agent-row">
+                    <span className="fd-taskloop-label">Retomar com</span>
+                    <div className="fd-taskloop-agent-btns">
+                      <button
+                        className={`fd-taskloop-agent-btn${resumeAgent === "claude" ? " active" : ""}`}
+                        onClick={() => setResumeAgent("claude")}
+                      >
+                        Claude
+                      </button>
+                      <button
+                        className={`fd-taskloop-agent-btn${resumeAgent === "codex" ? " active" : ""}`}
+                        onClick={() => setResumeAgent("codex")}
+                      >
+                        Codex
+                      </button>
+                    </div>
+                  </div>
+                )}
                 {selectedLoop.status === "running" ? (
                   <button className="fd-btn" onClick={() => void handlePause()}>
                     Pausar
                   </button>
                 ) : (
                   <button className="fd-btn fd-btn-primary" onClick={() => void handleResume()}>
-                    Retomar
+                    {selectedLoop.status === "failed" || selectedLoop.status === "stopped"
+                      ? "Retomar tarefa"
+                      : "Retomar"}
                   </button>
                 )}
-                <button className="fd-btn fd-btn-danger" onClick={() => void handleStop()}>
-                  Parar
-                </button>
+                {(selectedLoop.status === "running" || selectedLoop.status === "paused") && (
+                  <button className="fd-btn fd-btn-danger" onClick={() => void handleStop()}>
+                    Parar
+                  </button>
+                )}
               </div>
             )}
 
@@ -264,7 +304,7 @@ export function TaskLoopPanel({ projectId, onShowChanges, onShowTerminal }: Task
               {tasks.map((task) => (
                 <li
                   key={task.id}
-                  className={`fd-taskloop-task${task.taskIndex === selectedLoop.currentTaskIndex && selectedLoop.status === "running" ? " active" : ""}`}
+                  className={`fd-taskloop-task${task.taskIndex === selectedLoop.currentTaskIndex && (selectedLoop.status === "running" || selectedLoop.status === "failed") ? " active" : ""}`}
                 >
                   <span
                     className="fd-taskloop-task-dot"

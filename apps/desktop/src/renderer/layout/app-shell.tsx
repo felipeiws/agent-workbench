@@ -1,5 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { AiSettingsPanel } from "../components/ai-settings-panel";
+import { GeneralSettingsPanel } from "../components/general-settings-panel";
+import { AiTerminalPanel } from "../components/ai-terminal-panel";
+import { CodexBar } from "../components/codex-bar";
 import { ChangesPanel, type ChangeGroupView } from "../components/changes-panel";
 import { DiffPanel, type DiffMode } from "../components/diff-panel";
 import { GithubConfigPanel } from "../components/github-config-panel";
@@ -22,16 +26,22 @@ import { getDesktopApi } from "../lib/desktop-api";
 import {
   addToGitIgnore,
   commitFiles,
+  pushRepository,
   createTerminal,
+  fetchAppUpdateStatus,
   fetchAuditEvents,
   fetchCommitDiff,
   fetchDiff,
+  fetchGitStatus,
   fetchHistory,
   generateCommitMessage,
   importProject,
+  installManualUpdate,
   removeProject,
+  relaunchApp,
   fetchSnapshot,
   fetchTerminalOutput,
+  openFileInEditor,
   openProjectInIde,
   renameWorkspace,
   resizeTerminal,
@@ -44,7 +54,9 @@ import {
 } from "../lib/queries";
 import type {
   AgentSuspicion,
+  AiTerminalSessionRecord,
   AuditEvent,
+  CommandBlock,
   DiffPreview,
   FileHistoryEntry,
   GitFileChange,
@@ -52,7 +64,12 @@ import type {
   TerminalChunkRecord,
   WorkspaceSnapshot
 } from "@agent-workbench/types";
-import type { SystemStatsEvent } from "@agent-workbench/shared";
+import type {
+  AppUpdateStatus,
+  ManualUpdateInstallResult,
+  SystemStatsEvent,
+  TokenStatsEvent
+} from "@agent-workbench/shared";
 
 export function AppShell() {
   const [snapshot, setSnapshot] = useState<WorkspaceSnapshot | null>(null);
@@ -64,6 +81,7 @@ export function AppShell() {
   const [diffMode, setDiffMode] = useState<DiffMode>("side");
   const [safeMode, setSafeMode] = useState<UiSafeMode>("audit");
   const [terminalOutput, setTerminalOutput] = useState<Record<string, TerminalChunkRecord[]>>({});
+  const [terminalPreviews, setTerminalPreviews] = useState<Record<string, string[]>>({});
   const [selectedDiff, setSelectedDiff] = useState<DiffPreview | null>(null);
   const [selectedHistory, setSelectedHistory] = useState<FileHistoryEntry[]>([]);
   const [selectedCommitHash, setSelectedCommitHash] = useState<string | null>(null);
@@ -73,7 +91,25 @@ export function AppShell() {
   const [ideError, setIdeError] = useState<string | null>(null);
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
   const [systemStats, setSystemStats] = useState<SystemStatsEvent | null>(null);
+  const [tokenStats, setTokenStats] = useState<TokenStatsEvent | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<"general" | "ai" | "update">("general");
+  const [updateStatus, setUpdateStatus] = useState<AppUpdateStatus | null>(null);
+  const [updateBusy, setUpdateBusy] = useState(false);
+  const [updateError, setUpdateError] = useState<string | null>(null);
+  const [updateSuccess, setUpdateSuccess] = useState<ManualUpdateInstallResult | null>(null);
+  const [inspectedProjectId, setInspectedProjectId] = useState<string | null>(null);
+  const [aiTerminalMode, setAiTerminalMode] = useState(false);
+  const [aiSessions, setAiSessions] = useState<AiTerminalSessionRecord[]>([]);
+  const [activeAiSessionId, setActiveAiSessionId] = useState<string | null>(null);
+  const [aiBlocks, setAiBlocks] = useState<Record<string, CommandBlock[]>>({});
   const loadedProjectIdRef = useRef<string | null>(null);
+  // Batching refs: accumulate terminal chunks between animation frames
+  // instead of calling setState per-chunk (which can be 100-1000×/sec from agents)
+  const pendingOutputChunksRef = useRef<Record<string, TerminalChunkRecord[]>>({});
+  const pendingPreviewLinesRef = useRef<Record<string, string[]>>({});
+  const outputFlushRafRef = useRef<number | null>(null);
+  const fetchedSessionsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     void refreshSnapshot();
@@ -81,10 +117,48 @@ export function AppShell() {
 
   useEffect(() => {
     const unsubscribeOutput = getDesktopApi().onTerminalOutput((event) => {
-      setTerminalOutput((current) => ({
-        ...current,
-        [event.sessionId]: [...(current[event.sessionId] ?? []), event.chunk]
-      }));
+      // Accumulate in refs — no React state update yet
+      const pending = pendingOutputChunksRef.current;
+      if (!pending[event.sessionId]) pending[event.sessionId] = [];
+      pending[event.sessionId]!.push(event.chunk);
+
+      const newLines = event.chunk.content.split(/\r?\n/).map((l) => l.trimEnd()).filter(Boolean);
+      if (newLines.length > 0) {
+        const pendingPrev = pendingPreviewLinesRef.current;
+        if (!pendingPrev[event.sessionId]) pendingPrev[event.sessionId] = [];
+        pendingPrev[event.sessionId]!.push(...newLines);
+      }
+
+      // Flush at most once per animation frame (~60fps cap)
+      if (outputFlushRafRef.current === null) {
+        outputFlushRafRef.current = requestAnimationFrame(() => {
+          outputFlushRafRef.current = null;
+          const chunks = pendingOutputChunksRef.current;
+          const lines = pendingPreviewLinesRef.current;
+          pendingOutputChunksRef.current = {};
+          pendingPreviewLinesRef.current = {};
+
+          if (Object.keys(chunks).length > 0) {
+            setTerminalOutput((current) => {
+              const next = { ...current };
+              for (const [id, cs] of Object.entries(chunks)) {
+                next[id] = [...(current[id] ?? []), ...cs];
+              }
+              return next;
+            });
+          }
+
+          if (Object.keys(lines).length > 0) {
+            setTerminalPreviews((current) => {
+              const next = { ...current };
+              for (const [id, ls] of Object.entries(lines)) {
+                next[id] = [...(current[id] ?? []), ...ls].slice(-8);
+              }
+              return next;
+            });
+          }
+        });
+      }
     });
 
     const unsubscribeExit = getDesktopApi().onTerminalExit(() => {
@@ -164,6 +238,59 @@ export function AppShell() {
       setSystemStats(event);
     });
 
+    const unsubscribeTokenStats = getDesktopApi().onTokenStats((event) => {
+      setTokenStats(event);
+    });
+
+    const unsubscribeAiBlockStart = getDesktopApi().onAiTerminalBlockStart((event) => {
+      setAiBlocks((current) => ({
+        ...current,
+        [event.sessionId]: [...(current[event.sessionId] ?? []), event.block]
+      }));
+    });
+
+    const unsubscribeAiBlockChunk = getDesktopApi().onAiTerminalBlockChunk((event) => {
+      setAiBlocks((current) => {
+        const sessionBlocks = current[event.sessionId] ?? [];
+        const updated = sessionBlocks.map((b) =>
+          b.id === event.blockId ? { ...b, output: b.output + event.chunk } : b
+        );
+        return { ...current, [event.sessionId]: updated };
+      });
+    });
+
+    const unsubscribeAiBlockEnd = getDesktopApi().onAiTerminalBlockEnd((event) => {
+      setAiBlocks((current) => {
+        const sessionBlocks = current[event.sessionId] ?? [];
+        const updated = sessionBlocks.map((b) =>
+          b.id === event.blockId
+            ? { ...b, exitCode: event.exitCode, cwd: event.cwd, completedAt: event.completedAt, isRunning: false }
+            : b
+        );
+        return { ...current, [event.sessionId]: updated };
+      });
+      setAiSessions((current) =>
+        current.map((s) =>
+          s.id === event.sessionId ? { ...s, state: "idle", cwd: event.cwd } : s
+        )
+      );
+    });
+
+    const unsubscribeAiPrompt = getDesktopApi().onAiTerminalPrompt((event) => {
+      setAiSessions((current) =>
+        current.map((s) => (s.id === event.sessionId ? { ...s, cwd: event.cwd } : s))
+      );
+    });
+
+    const unsubscribeAiExit = getDesktopApi().onAiTerminalExit((event) => {
+      setAiSessions((current) => current.filter((s) => s.id !== event.sessionId));
+      setAiBlocks((current) => {
+        const next = { ...current };
+        delete next[event.sessionId];
+        return next;
+      });
+    });
+
     return () => {
       unsubscribeOutput();
       unsubscribeExit();
@@ -172,6 +299,15 @@ export function AppShell() {
       unsubscribeAudit();
       unsubscribeIssueDispatched();
       unsubscribeSystemStats();
+      unsubscribeTokenStats();
+      unsubscribeAiBlockStart();
+      unsubscribeAiBlockChunk();
+      unsubscribeAiBlockEnd();
+      unsubscribeAiPrompt();
+      unsubscribeAiExit();
+      if (outputFlushRafRef.current !== null) {
+        cancelAnimationFrame(outputFlushRafRef.current);
+      }
     };
   }, []);
 
@@ -199,6 +335,19 @@ export function AppShell() {
   const selectedProject = useMemo(() => {
     return projects.find((project) => project.project.id === projectId) ?? projects[0] ?? null;
   }, [projectId, projects]);
+
+  const selectedProjectId = selectedProject?.project.id ?? null;
+  const selectedChangeStatus = useMemo(() => {
+    if (!selectedProject || !selectedChangeKey) {
+      return null;
+    }
+
+    return selectedProject.git.groups
+      .flatMap((group) => group.items)
+      .find((item) => item.path === selectedChangeKey)?.status ?? null;
+  }, [selectedChangeKey, selectedProject?.git.groups]);
+
+  const selectedChangeStaged = selectedChangeStatus === "staged";
 
   const sidebarProjects = useMemo<SidebarProjectItem[]>(() => {
     return projects.map((project) => ({
@@ -251,9 +400,9 @@ export function AppShell() {
       cmd: session.command,
       cwd: session.cwd,
       state: mapSessionState(session.state),
-      previewLines: buildTerminalPreview(terminalOutput[session.id] ?? [])
+      previewLines: terminalPreviews[session.id] ?? []
     }));
-  }, [selectedProject, terminalOutput]);
+  }, [selectedProject, terminalPreviews]);
 
   const changeGroups = useMemo<ChangeGroupView[]>(() => {
     if (!selectedProject) {
@@ -305,54 +454,48 @@ export function AppShell() {
         : visibleSessions[0]?.id ?? null
     );
 
-    const nextSelectedFile =
-      selectedProject.layout.selectedFilePath ??
-      selectedProject.git.groups[0]?.items[0]?.path ??
-      selectedProject.git.diff.filePath;
-
-    setSelectedChangeKey(nextSelectedFile);
+    setInspectedProjectId(null);
+    setSelectedChangeKey(selectedProject.layout.selectedFilePath ?? "");
     setSelectedCommitHash(null);
-    setSelectedDiff(
-      selectedProject.git.diff.filePath === nextSelectedFile ? selectedProject.git.diff : null
-    );
-    setSelectedHistory(
-      selectedProject.git.diff.filePath === nextSelectedFile ? selectedProject.git.history : []
-    );
-  }, [selectedProject]);
+    setSelectedDiff(null);
+    setSelectedHistory([]);
+  }, [
+    selectedProject?.project.id,
+    selectedProject?.config.config.safeMode,
+    selectedProject?.layout.activeSessionId,
+    selectedProject?.layout.diffMode,
+    selectedProject?.layout.selectedFilePath,
+    selectedProject?.layout.terminalMode,
+    selectedProject?.sessions
+  ]);
 
   useEffect(() => {
     if (!selectedProject) {
       return;
     }
 
+    // Use a ref to track fetched sessions so this effect doesn't depend on
+    // terminalOutput (which changes on every chunk and would cause this to re-run)
     for (const session of selectedProject.sessions) {
-      if (terminalOutput[session.id]) {
+      if (fetchedSessionsRef.current.has(session.id)) {
         continue;
       }
 
+      fetchedSessionsRef.current.add(session.id);
       void fetchTerminalOutput(session.id).then((chunks) => {
-        setTerminalOutput((current) => ({
-          ...current,
-          [session.id]: chunks
-        }));
+        setTerminalOutput((current) => ({ ...current, [session.id]: chunks }));
+        setTerminalPreviews((current) => ({ ...current, [session.id]: buildTerminalPreview(chunks) }));
       });
     }
-  }, [selectedProject, terminalOutput]);
+  }, [selectedProject]);
 
   useEffect(() => {
-    if (!selectedProject || !selectedChangeKey) {
-      return;
-    }
-
-    setSelectedCommitHash(null);
-
-    const isStaged = selectedProject.git.groups
-      .flatMap((g) => g.items)
-      .find((item) => item.path === selectedChangeKey)?.status === "staged";
-
-    if (selectedProject.git.diff.filePath === selectedChangeKey) {
-      setSelectedDiff(selectedProject.git.diff);
-      setSelectedHistory(selectedProject.git.history);
+    if (
+      !selectedProjectId ||
+      inspectedProjectId !== selectedProjectId ||
+      !selectedChangeKey ||
+      selectedCommitHash
+    ) {
       return;
     }
 
@@ -360,12 +503,12 @@ export function AppShell() {
 
     void Promise.all([
       fetchDiff(
-        selectedProject.project.id,
+        selectedProjectId,
         selectedChangeKey,
         diffMode === "inline" ? "inline" : "side-by-side",
-        isStaged
+        selectedChangeStaged
       ),
-      fetchHistory(selectedProject.project.id, selectedChangeKey)
+      fetchHistory(selectedProjectId, selectedChangeKey)
     ]).then(([diff, history]) => {
       if (cancelled) {
         return;
@@ -378,7 +521,14 @@ export function AppShell() {
     return () => {
       cancelled = true;
     };
-  }, [diffMode, selectedChangeKey, selectedProject]);
+  }, [
+    diffMode,
+    inspectedProjectId,
+    selectedChangeKey,
+    selectedChangeStaged,
+    selectedCommitHash,
+    selectedProjectId
+  ]);
 
   useEffect(() => {
     if (!selectedProject || loadedProjectIdRef.current !== selectedProject.project.id) {
@@ -451,6 +601,11 @@ export function AppShell() {
       return;
     }
 
+    if (template.command === "__ai_terminal__") {
+      setAiTerminalMode(true);
+      return;
+    }
+
     const session = await createTerminal(
       selectedProject.project.id,
       template.name,
@@ -515,6 +670,64 @@ export function AppShell() {
     }
   }
 
+  async function handleStageAll(filePaths: string[]) {
+    if (!selectedProject) return;
+    try {
+      setGitError(null);
+      let groups = selectedProject.git.groups;
+      for (const filePath of filePaths) {
+        groups = await stageFile(selectedProject.project.id, filePath);
+      }
+      setSnapshot((current) => {
+        if (!current) return current;
+        return {
+          ...current,
+          projects: current.projects.map((project) =>
+            project.project.id === selectedProject.project.id
+              ? { ...project, git: { ...project.git, groups } }
+              : project
+          )
+        };
+      });
+    } catch (error) {
+      setGitError(error instanceof Error ? error.message : "Git stage all failed.");
+    }
+  }
+
+  async function handleUnstageAll(filePaths: string[]) {
+    if (!selectedProject) return;
+    try {
+      setGitError(null);
+      let groups = selectedProject.git.groups;
+      for (const filePath of filePaths) {
+        groups = await unstageFile(selectedProject.project.id, filePath);
+      }
+      setSnapshot((current) => {
+        if (!current) return current;
+        return {
+          ...current,
+          projects: current.projects.map((project) =>
+            project.project.id === selectedProject.project.id
+              ? { ...project, git: { ...project.git, groups } }
+              : project
+          )
+        };
+      });
+    } catch (error) {
+      setGitError(error instanceof Error ? error.message : "Git unstage all failed.");
+    }
+  }
+
+  async function handleOpenInEditor(filePath: string) {
+    if (!selectedProject) return;
+    try {
+      setGitError(null);
+      await openFileInEditor(selectedProject.project.id, filePath);
+    } catch (error) {
+      setGitError(error instanceof Error ? error.message : "Failed to open file in editor.");
+    }
+  }
+
   async function handleGitIgnore(filePath: string) {
     if (!selectedProject) {
       return;
@@ -526,6 +739,42 @@ export function AppShell() {
     } catch (error) {
       setGitError(error instanceof Error ? error.message : "Failed to add to .gitignore.");
     }
+  }
+
+  async function handleRefreshGitStatus() {
+    if (!selectedProject) {
+      return;
+    }
+
+    try {
+      setGitError(null);
+      const groups = await fetchGitStatus(selectedProject.project.id);
+      setSnapshot((current) => {
+        if (!current) return current;
+        return {
+          ...current,
+          projects: current.projects.map((project) =>
+            project.project.id === selectedProject.project.id
+              ? { ...project, git: { ...project.git, groups } }
+              : project
+          )
+        };
+      });
+    } catch (error) {
+      setGitError(error instanceof Error ? error.message : "Failed to refresh git status.");
+    }
+  }
+
+  function handleSelectChange(changeKey: string) {
+    if (!selectedProjectId) {
+      return;
+    }
+
+    setInspectedProjectId(selectedProjectId);
+    setSelectedChangeKey(changeKey);
+    setSelectedCommitHash(null);
+    setSelectedDiff(null);
+    setSelectedHistory([]);
   }
 
   async function handleSelectCommit(hash: string | null) {
@@ -607,6 +856,23 @@ export function AppShell() {
     });
   }
 
+  async function handleCommitAndPush(message: string) {
+    if (!selectedProject) return;
+    const groups = await commitFiles(selectedProject.project.id, message);
+    setSnapshot((current) => {
+      if (!current) return current;
+      return {
+        ...current,
+        projects: current.projects.map((project) =>
+          project.project.id === selectedProject.project.id
+            ? { ...project, git: { ...project.git, groups } }
+            : project
+        )
+      };
+    });
+    await pushRepository(selectedProject.project.id);
+  }
+
   async function handleGenerateCommitMessage(): Promise<string> {
     if (!selectedProject) {
       throw new Error("No project selected.");
@@ -642,6 +908,93 @@ export function AppShell() {
     }
   }
 
+  async function handleToggleSettings() {
+    const nextOpen = !settingsOpen;
+    setSettingsOpen(nextOpen);
+
+    if (!nextOpen) {
+      return;
+    }
+
+    setUpdateError(null);
+    setUpdateSuccess(null);
+
+    try {
+      setUpdateStatus(await fetchAppUpdateStatus());
+    } catch (error) {
+      setUpdateError(
+        error instanceof Error ? error.message : "Failed to load update status."
+      );
+    }
+  }
+
+  async function handleInstallManualUpdate() {
+    setUpdateBusy(true);
+    setUpdateError(null);
+    setUpdateSuccess(null);
+
+    try {
+      const result = await installManualUpdate();
+      const status = await fetchAppUpdateStatus();
+      setUpdateStatus(status);
+
+      if (result) {
+        setUpdateSuccess(result);
+      }
+    } catch (error) {
+      setUpdateError(
+        error instanceof Error ? error.message : "Failed to install replacement AppImage."
+      );
+    } finally {
+      setUpdateBusy(false);
+    }
+  }
+
+  async function handleRelaunch() {
+    await relaunchApp();
+  }
+
+  async function handleCreateAiSession(name: string, provider: "claude" | "codex") {
+    if (!selectedProject) return;
+    const session = await getDesktopApi().aiTerminal.create({
+      projectId: selectedProject.project.id,
+      name,
+      provider
+    });
+    setAiSessions((current) => [...current, session]);
+    setActiveAiSessionId(session.id);
+    setAiBlocks((current) => ({ ...current, [session.id]: [] }));
+  }
+
+  async function handleAiQuery(
+    sessionId: string,
+    prompt: string,
+    provider: "claude" | "codex"
+  ): Promise<string> {
+    const result = await getDesktopApi().aiTerminal.query({ sessionId, prompt, provider });
+    return JSON.stringify(result);
+  }
+
+  function handleAiSendCommand(sessionId: string, command: string) {
+    void getDesktopApi().aiTerminal.send({ sessionId, command });
+    setAiSessions((current) =>
+      current.map((s) => (s.id === sessionId ? { ...s, state: "running" } : s))
+    );
+  }
+
+  async function handleAiTerminate(sessionId: string) {
+    await getDesktopApi().aiTerminal.terminate(sessionId);
+    setAiSessions((current) => current.filter((s) => s.id !== sessionId));
+    setAiBlocks((current) => {
+      const next = { ...current };
+      delete next[sessionId];
+      return next;
+    });
+    if (activeAiSessionId === sessionId) {
+      setActiveAiSessionId(null);
+    }
+  }
+
   if (!snapshot) {
     return <div className="fd-app-shell" />;
   }
@@ -662,8 +1015,106 @@ export function AppShell() {
         }
         project={selectedProject?.project.name ?? ""}
         safeMode={safeMode}
+        settingsOpen={settingsOpen}
         workspace={workspaceName}
+        onToggleSettings={() => void handleToggleSettings()}
       />
+
+      {settingsOpen ? (
+        <section className="fd-settings-overlay" role="dialog" aria-modal="true" aria-label="Settings">
+          <div className="fd-settings-card fd-settings-card--wide">
+            <div className="fd-settings-head">
+              <div className="fd-settings-tabs">
+                <button
+                  className={`fd-settings-tab ${settingsTab === "general" ? "active" : ""}`}
+                  type="button"
+                  onClick={() => setSettingsTab("general")}
+                >
+                  Geral
+                </button>
+                <button
+                  className={`fd-settings-tab ${settingsTab === "ai" ? "active" : ""}`}
+                  type="button"
+                  onClick={() => setSettingsTab("ai")}
+                >
+                  IA
+                </button>
+                <button
+                  className={`fd-settings-tab ${settingsTab === "update" ? "active" : ""}`}
+                  type="button"
+                  onClick={() => setSettingsTab("update")}
+                >
+                  Atualização
+                </button>
+              </div>
+              <button
+                className="fd-icon-button"
+                type="button"
+                aria-label="Fechar configurações"
+                onClick={() => setSettingsOpen(false)}
+              >
+                ×
+              </button>
+            </div>
+
+            {settingsTab === "general" ? (
+              <GeneralSettingsPanel />
+            ) : settingsTab === "ai" ? (
+              <AiSettingsPanel />
+            ) : (
+              <>
+                <div className="fd-settings-subtitle" style={{ marginBottom: 14 }}>
+                  Substituir o AppImage em execução por um arquivo mais novo e reiniciar quando pronto.
+                </div>
+                <div className="fd-settings-grid">
+                  <div className="fd-settings-row">
+                    <span className="label">Versão</span>
+                    <span className="mono">{updateStatus?.version ?? "—"}</span>
+                  </div>
+                  <div className="fd-settings-row">
+                    <span className="label">Runtime</span>
+                    <span className="mono">{updateStatus?.canInstallUpdate ? "AppImage" : "Sem suporte"}</span>
+                  </div>
+                  <div className="fd-settings-block">
+                    <span className="label">Executável</span>
+                    <span className="mono">{updateStatus?.executablePath ?? "Carregando..."}</span>
+                  </div>
+                  {updateStatus?.reason ? (
+                    <div className="fd-settings-note warning">{updateStatus.reason}</div>
+                  ) : null}
+                  {updateError ? (
+                    <div className="fd-settings-note error">{updateError}</div>
+                  ) : null}
+                  {updateSuccess ? (
+                    <div className="fd-settings-note success">
+                      Substituição aplicada de <span className="mono">{updateSuccess.sourcePath}</span>.
+                      Reinicie para usar o AppImage atualizado.
+                    </div>
+                  ) : null}
+                </div>
+                <div className="fd-settings-actions">
+                  <button
+                    className="fd-secondary-button"
+                    type="button"
+                    onClick={() => void handleInstallManualUpdate()}
+                    disabled={updateBusy || !updateStatus?.canInstallUpdate}
+                  >
+                    {updateBusy ? "Instalando..." : "Selecionar novo AppImage"}
+                  </button>
+                  <button
+                    className="fd-primary-button"
+                    type="button"
+                    onClick={() => void handleRelaunch()}
+                    disabled={!updateSuccess}
+                  >
+                    Reiniciar
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </section>
+      ) : null}
 
       <main className="fd-main-grid">
         <Sidebar
@@ -686,25 +1137,46 @@ export function AppShell() {
         />
         {selectedProject ? (
           <>
-            <TerminalPanel
-              activeTerminalId={activeTerminalId}
-              auditEvents={auditEvents.filter(
-                (e) => e.projectId === selectedProject.project.id
-              )}
-              onCreateTerminal={handleCreateTerminal}
-              onRestartTerminal={(sessionId) => void handleRestartTerminal(sessionId)}
-              onTerminalInput={(sessionId, input) => void handleTerminalInput(sessionId, input)}
-              onTerminalModeChange={setTerminalMode}
-              onTerminalResize={(sessionId, cols, rows) =>
-                void handleTerminalResize(sessionId, cols, rows)
-              }
-              onTerminalSelect={setActiveTerminalId}
-              onTerminateTerminal={(sessionId) => void handleTerminateTerminal(sessionId)}
-              terminalOutput={terminalOutput}
-              templates={templates}
-              terminalMode={terminalMode}
-              terminals={terminalViews}
-            />
+            {aiTerminalMode ? (
+              <AiTerminalPanel
+                projectId={selectedProject.project.id}
+                sessions={aiSessions.filter((s) => s.projectId === selectedProject.project.id)}
+                activeSessionId={activeAiSessionId}
+                blocks={aiBlocks}
+                onCreateSession={(name, provider) => void handleCreateAiSession(name, provider)}
+                onSelectSession={setActiveAiSessionId}
+                onTerminateSession={(id) => void handleAiTerminate(id)}
+                onSendCommand={handleAiSendCommand}
+                onQuery={handleAiQuery}
+                onResize={(sessionId, cols, rows) =>
+                  void getDesktopApi().aiTerminal.resize({ sessionId, cols, rows })
+                }
+                onClose={() => setAiTerminalMode(false)}
+              />
+            ) : (
+              <TerminalPanel
+                activeTerminalId={activeTerminalId}
+                auditEvents={auditEvents.filter(
+                  (e) => e.projectId === selectedProject.project.id
+                )}
+                onCreateTerminal={handleCreateTerminal}
+                onRestartTerminal={(sessionId) => void handleRestartTerminal(sessionId)}
+                onTerminalInput={(sessionId, input) => void handleTerminalInput(sessionId, input)}
+                onTerminalModeChange={setTerminalMode}
+                onTerminalResize={(sessionId, cols, rows) =>
+                  void handleTerminalResize(sessionId, cols, rows)
+                }
+                onTerminalSelect={setActiveTerminalId}
+                onTerminateTerminal={(sessionId) => void handleTerminateTerminal(sessionId)}
+                terminalOutput={terminalOutput}
+                templates={[
+                  ...templates,
+                  { name: "AI Terminal", type: "agent" as const, command: "__ai_terminal__" }
+                ]}
+                terminalMode={terminalMode}
+                terminals={terminalViews}
+              />
+            )}
             {changesPanelView === "github-config" ? (
               <GithubConfigPanel
                 currentConfig={selectedProject.config.config.github ?? null}
@@ -733,19 +1205,25 @@ export function AppShell() {
                 groups={changeGroups}
                 hasGithub={!!selectedProject.config.config.github}
                 onCommit={(message) => handleCommit(message)}
+                onCommitAndPush={(message) => handleCommitAndPush(message)}
                 onGenerateCommitMessage={() => handleGenerateCommitMessage()}
-                onGitIgnore={(filePath) => void handleGitIgnore(filePath)}
-                onSelectChange={setSelectedChangeKey}
+                onOpenInEditor={(filePath) => void handleOpenInEditor(filePath)}
+                onRefresh={() => void handleRefreshGitStatus()}
+                onSelectChange={(changeKey) => void handleSelectChange(changeKey)}
                 onShowGitHubConfig={() => setChangesPanelView("github-config")}
                 onShowIssues={() => setChangesPanelView("issues")}
                 onShowTaskLoop={() => setChangesPanelView("taskloop")}
                 onStageChange={(filePath) => void handleStageFile(filePath)}
+                onStageAll={(filePaths) => void handleStageAll(filePaths)}
                 onUnstageChange={(filePath) => void handleUnstageFile(filePath)}
+                onUnstageAll={(filePaths) => void handleUnstageAll(filePaths)}
                 selectedChangeKey={selectedChangeKey}
               />
             )}
             <DiffPanel
-              absoluteFilePath={`${selectedProject.project.path}/${selectedChangeKey}`}
+              absoluteFilePath={
+                selectedChangeKey ? `${selectedProject.project.path}/${selectedChangeKey}` : undefined
+              }
               commits={selectedHistory}
               diff={selectedDiff ?? undefined}
               diffMode={diffMode}
@@ -780,6 +1258,7 @@ export function AppShell() {
             <span>{changeGroups.reduce((sum, group) => sum + group.items.length, 0)} changes</span>
           </>
         ) : null}
+        <CodexBar stats={tokenStats} />
         {systemStats ? (
           <div className="fd-sys-stats">
             <div className="fd-sys-stat">

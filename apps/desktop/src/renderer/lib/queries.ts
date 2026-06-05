@@ -1,4 +1,7 @@
 import type {
+  AppSettings,
+  AppUpdateStatus,
+  ManualUpdateInstallResult,
   SaveProjectLayoutPayload,
 } from "@agent-workbench/shared";
 import type {
@@ -30,6 +33,26 @@ export async function renameWorkspace(workspaceId: string, name: string): Promis
 
 export async function fetchSnapshot(): Promise<WorkspaceSnapshot> {
   return getDesktopApi().app.getSnapshot();
+}
+
+export async function fetchAppUpdateStatus(): Promise<AppUpdateStatus> {
+  return getDesktopApi().app.getUpdateStatus();
+}
+
+export async function installManualUpdate(): Promise<ManualUpdateInstallResult | null> {
+  return getDesktopApi().app.installManualUpdate();
+}
+
+export async function relaunchApp(): Promise<void> {
+  return getDesktopApi().app.relaunch();
+}
+
+export async function fetchAppSettings(): Promise<AppSettings> {
+  return getDesktopApi().app.getSettings();
+}
+
+export async function saveAppSettings(settings: Partial<AppSettings>): Promise<AppSettings> {
+  return getDesktopApi().app.saveSettings(settings);
 }
 
 export async function fetchProjectConfig(projectId: ProjectId): Promise<LoadedProjectConfig> {
@@ -133,6 +156,10 @@ export async function commitFiles(projectId: string, message: string): Promise<G
   return getDesktopApi().git.commit({ projectId, message });
 }
 
+export async function pushRepository(projectId: string): Promise<void> {
+  return getDesktopApi().git.push(projectId);
+}
+
 export async function generateCommitMessage(projectId: string): Promise<string> {
   return getDesktopApi().git.generateCommitMessage(projectId);
 }
@@ -142,6 +169,14 @@ export async function openProjectInIde(
   filePath?: string
 ): Promise<void> {
   return getDesktopApi().projects.openIde({ projectId, filePath });
+}
+
+export async function openFileInEditor(
+  projectId: string,
+  filePath: string,
+  line?: number
+): Promise<void> {
+  return getDesktopApi().projects.openFileInEditor({ projectId, filePath, line });
 }
 
 export async function fetchAuditEvents(projectId: string): Promise<AuditEvent[]> {
@@ -188,8 +223,8 @@ export async function pauseTaskLoop(loopId: string): Promise<void> {
   return getDesktopApi().taskloop.pause({ loopId });
 }
 
-export async function resumeTaskLoop(loopId: string): Promise<void> {
-  return getDesktopApi().taskloop.resume({ loopId });
+export async function resumeTaskLoop(loopId: string, agent?: TaskLoopAgent): Promise<void> {
+  return getDesktopApi().taskloop.resume({ loopId, agent });
 }
 
 export async function stopTaskLoop(loopId: string): Promise<void> {

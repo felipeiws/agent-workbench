@@ -202,6 +202,7 @@ export interface CreateTaskLoopInput {
 }
 
 export interface UpdateTaskLoopInput {
+  agent?: string;
   status?: string;
   currentTaskIndex?: number;
   sessionId?: string | null;
@@ -317,6 +318,16 @@ const migrations: MigrationDefinition[] = [
       );
 
       CREATE INDEX IF NOT EXISTS idx_github_issues_project_id ON github_issues(project_id);
+    `
+  },
+  {
+    name: "006_app_settings",
+    sql: `
+      CREATE TABLE IF NOT EXISTS app_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
     `
   },
   {
@@ -921,5 +932,21 @@ export class DatabaseClient {
 
   deleteTaskLoop(loopId: string): void {
     this.db.prepare("DELETE FROM task_loops WHERE id = ?").run(loopId);
+  }
+
+  getAppSetting(key: string): string | null {
+    const row = this.db
+      .prepare("SELECT value FROM app_settings WHERE key = ? LIMIT 1")
+      .get(key) as Record<string, unknown> | undefined;
+    return row ? String(row.value) : null;
+  }
+
+  setAppSetting(key: string, value: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
+      )
+      .run(key, value, now());
   }
 }
